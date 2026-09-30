@@ -32,7 +32,8 @@ Get-Content .\reports\android-environment.json
 ## 任务 3：阶段结论
 
 - [x] 将 Windows 实测结果更新到 docs/windows-android-environment.md。
-- [ ] 根据报告形成确切安装清单，安装后验证 SDK/JDK/NDK 和 Rust targets。
-- [ ] 通过首个真实 APK 构建与设备启动后，才开始功能开发验收。
+- [x] 根据报告形成确切安装清单，安装后验证 SDK/JDK/NDK 和 Rust targets。
+- [x] 构建首个真实 ARM64 debug APK，并验证签名和包信息。
+- [ ] 在真机上安装启动后，开始功能开发验收。
 
-任务 3 的安装和应用实现属于下一阶段；当前请求的完成标准为项目/Git 已建立以及可行性与未验证项如实交付。SSH 已恢复；部署前需释放内存并安装 Android 工具链。模拟器还需验证 WHPX 加速。
+已完成命令行工具链部署、应用脚手架与 APK 构建；真机运行仍待验收，模拟器还需验证 WHPX 加速。远端现有进程占用大量内存，本次未主动结束。
