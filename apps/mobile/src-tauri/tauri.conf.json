@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "HarmonyWork Mobile",
+  "productName": "Harmony Work",
   "version": "0.1.0",
   "identifier": "com.harmonywork.mobile",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "HarmonyWork Mobile",
+        "title": "Harmony Work",
         "width": 800,
         "height": 600
       }

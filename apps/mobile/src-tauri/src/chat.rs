@@ -43,46 +43,65 @@ fn visible_text(value: &Value) -> Option<String> {
     if let Some(output) = value.get("output").and_then(Value::as_array) {
         for item in output {
             if item.get("type").and_then(Value::as_str) != Some("message")
-                || item.get("role").and_then(Value::as_str) != Some("assistant") {
+                || item.get("role").and_then(Value::as_str) != Some("assistant")
+            {
                 continue;
             }
             if let Some(content) = item.get("content").and_then(Value::as_array) {
                 for part in content {
                     if part.get("type").and_then(Value::as_str) == Some("output_text") {
                         if let Some(text) = part.get("text").and_then(Value::as_str) {
-                            if !text.trim().is_empty() { parts.push(text.trim()); }
+                            if !text.trim().is_empty() {
+                                parts.push(text.trim());
+                            }
                         }
                     }
                 }
             }
         }
     }
-    if !parts.is_empty() { return Some(parts.join("\n")); }
-    value.get("output_text").and_then(Value::as_str)
-        .map(str::trim).filter(|text| !text.is_empty()).map(str::to_string)
+    if !parts.is_empty() {
+        return Some(parts.join("\n"));
+    }
+    value
+        .get("output_text")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(str::to_string)
 }
 
 #[tauri::command]
-pub async fn mobile_chat(state: State<'_, AppState>, messages: Vec<ChatMessage>) -> Result<String, String> {
+pub async fn mobile_chat(
+    state: State<'_, AppState>,
+    messages: Vec<ChatMessage>,
+) -> Result<String, String> {
     validate_messages(&messages)?;
     let (model, mut api_key) = {
         let guard = state.session.lock().map_err(|_| "账户状态不可用")?;
         let session = guard.as_ref().ok_or("请先登录个人账户")?;
         (session.account.model.clone(), session.api_key.clone())
     };
-    let input: Vec<Value> = messages.into_iter().map(|message| {
-        json!({"role":message.role,"content":message.content})
-    }).collect();
-    let client = reqwest::Client::builder().timeout(Duration::from_secs(90))
-        .build().map_err(|_| "无法初始化模型连接")?;
-    let result = client.post(RESPONSES_URL).bearer_auth(&api_key)
+    let input: Vec<Value> = messages
+        .into_iter()
+        .map(|message| json!({"role":message.role,"content":message.content}))
+        .collect();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(90))
+        .build()
+        .map_err(|_| "无法初始化模型连接")?;
+    let result = client
+        .post(RESPONSES_URL)
+        .bearer_auth(&api_key)
         .json(&json!({
             "model": model,
             "instructions": MOBILE_INSTRUCTIONS,
             "input": input,
             "store": false,
             "max_output_tokens": 1200
-        })).send().await;
+        }))
+        .send()
+        .await;
     api_key.zeroize();
     let response = result.map_err(|_| "模型网关连接失败或超时，请检查网络后重试")?;
     if !response.status().is_success() {
@@ -92,13 +111,16 @@ pub async fn mobile_chat(state: State<'_, AppState>, messages: Vec<ChatMessage>)
             _ => format!("模型网关暂不可用（HTTP {}）", response.status()),
         });
     }
-    let value: Value = response.json().await.map_err(|_| "模型网关返回的数据无效")?;
+    let value: Value = response
+        .json()
+        .await
+        .map_err(|_| "模型网关返回的数据无效")?;
     visible_text(&value).ok_or_else(|| "模型没有返回可显示的文字，请重试".to_string())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{visible_text, validate_messages, ChatMessage};
+    use super::{validate_messages, visible_text, ChatMessage};
     use serde_json::json;
 
     #[test]
@@ -118,9 +140,15 @@ mod tests {
 
     #[test]
     fn rejects_unbounded_or_non_user_final_input() {
-        let invalid = vec![ChatMessage { role: "assistant".into(), content: "hello".into() }];
+        let invalid = vec![ChatMessage {
+            role: "assistant".into(),
+            content: "hello".into(),
+        }];
         assert!(validate_messages(&invalid).is_err());
-        let long = vec![ChatMessage { role: "user".into(), content: "x".repeat(8_001) }];
+        let long = vec![ChatMessage {
+            role: "user".into(),
+            content: "x".repeat(8_001),
+        }];
         assert!(validate_messages(&long).is_err());
     }
 }
