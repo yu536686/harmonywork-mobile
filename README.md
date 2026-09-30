@@ -4,18 +4,20 @@ Android 优先的 HarmonyWork 移动端，后续支持 iOS。
 
 ## 当前状态
 
-2026-09-30：已建立独立 Git 仓库和 Tauri 2 + React + TypeScript Android 工程。远端 Windows 已安装 JDK、SDK、NDK 和 ARM64 Rust target。第一阶段已将框架演示页替换为正式移动界面，实现账户登录、兼容桌面端的加密云设置解密、手机独立调用 Harmony Responses，以及按账户隔离的本地对话。前端构建、Rust 单元测试和 ARM64 Debug APK 构建通过；APK 已安装在小米真机与 MuMu。MuMu 上已观察到真实账户登录后的独立会话和模型回复。
+Android 第一阶段已具备个人账户登录、加密云模型配置解锁、手机独立 Harmony Responses 对话，以及按账户隔离的本地会话。2026-10-01 增加 Windows 桌面端扫码绑定、跨端会话同步与远端任务交接：手机可选择已绑定设备提交任务；电脑在后台领取并执行；任务进度和结果返回手机，桌面会话标记「手机端」。
 
-- Windows 项目路径：`E:\harmony-work-mobile`
-- Mac 已挂载路径：`/Volumes/192.168.11.5/harmony-work-mobile`
-- 桌面项目：`E:\harmony-work`，保持独立，不复制桌面运行环境。
-- 技术基线：Tauri 2、React、TypeScript、Rust；Android 工程已生成，产品功能仍待实现。
+- Android 项目：`E:\harmony-work-mobile`，Git 分支 `feat/mobile-desktop-bridge`
+- Windows 桌面连接分支：`E:\harmony-work-mobile-bridge`，Git 分支 `feat/windows-mobile-bridge`
+- 自建协调服务：`https://remote.harmonywatch.cn/api/mobile`，A 记录直指 `61.150.31.150`，部署在 11.29 的 `harmonywork-remote.service`
+- Debug APK：`apps/mobile/src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk`
 
-## 产品边界
+## 连接与数据路径
 
-手机小亨通过个人账户模型配置独立对话并完成轻量任务。需要本地文件、桌面软件或复杂执行环境时，将完整子任务委派给已授权电脑。服务端持久化任务状态；手机断线后远端继续执行，重连获取进度与成果。
+桌面端左下角手机图标生成 5 分钟一次性二维码；手机在「我的设备」中扫码，同一账户完成绑定。MuMu 无摄像头时可复制配对内容。手机会话自动同步到 11.29，再由已绑定桌面端导入本地会话列表。任务采用服务端队列和租约，Windows 端在后台轮询，执行后写回状态和结果；断线后可按租约重试。
 
-产品目标保留对话、Harvis 图片生成、技能远程管理、任务、记忆。第一阶段已接入独立文本对话，其余功能有明确入口和真实接入状态，尚未宣称完成远端服务。任务消息先走 HTTPS/WSS；文件独立传输，P2P 在后续阶段验证。
+绑定后两端还会尝试 WebRTC DataChannel 直连，用于低延迟任务提醒；NAT 或网络限制使直连失败时，HTTPS 队列继续工作。当前不提供文件 P2P 传输，任务正文和结果始终经过自建服务。会话和任务内容以明文存储于 11.29 的 PostgreSQL；模型 API Key 仍只在移动端 Rust 内存中解密，不写入这套桥接数据库。
+
+Harvis 生图、技能远程管理与跨端记忆目前只有真实状态入口，尚未接入功能。移动端登录后需保持网络，桌面端需运行并保持个人账户已登录才能领取任务。
 
 ## 目录
 
@@ -37,8 +39,8 @@ powershell.exe -NoProfile -File .\scripts\windows\Inspect-AndroidEnvironment.ps1
 
 报告写入 `reports/android-environment.json`，不进入 Git。脚本不安装 SDK、不修改系统环境变量、不启用虚拟化、不重启机器；工具版本探测仅启动所列开发工具，ADB 版本检查不连接设备。
 
-已通过 SSH 在 Windows 执行检查脚本并安装命令行工具链。JDK、SDK/NDK、Rust ARM64 target、前端及 APK 构建已验证。使用 `scripts\windows\Test-MobileRust.cmd` 运行 Rust 单元测试，`scripts\windows\Build-AndroidDebug.cmd` 构建 APK，产物在 `apps\mobile\src-tauri\gen\android\app\build\outputs\apk\universal\debug\app-universal-debug.apk`。当前 Debug APK 为 55,037,832 字节，SHA256 `efef85398e591da256928731b0448b4b2f66f2d6568d56472eb7d524a79e6929`。新构建会改变哈希。
+已通过 SSH 在 Windows 执行检查脚本并安装命令行工具链。JDK、SDK/NDK、Rust ARM64 target、前端及 APK 构建已验证。使用 `scripts\windows\Test-MobileRust.cmd` 运行 Rust 单元测试，`scripts\windows\Build-AndroidDebug.cmd` 构建 APK，产物在 `apps\mobile\src-tauri\gen\android\app\build\outputs\apk\universal\debug\app-universal-debug.apk`。具体 APK 大小和 SHA256 以当前构建产物为准。
 
-Android 登录后，手机从账户服务取得加密设置快照，并只在 Rust 内存中解锁 Harmony API Key。Cookie、密码和 API Key 不进入前端本地存储；关闭进程后需要重新登录。本地对话保存在 WebView localStorage，并按账户 ID 隔离。当前没有设备绑定、后台任务或跨端记忆服务，相关页面不会展示虚假数据。
+Android 登录后，手机从账户服务取得加密设置快照，并只在 Rust 内存中解锁 Harmony API Key。Cookie、密码和 API Key 不进入前端本地存储；关闭进程后需要重新登录。本地对话保存在 WebView localStorage，并按账户 ID 隔离。设备绑定和远端任务现已接入；跨端记忆尚未接入，相关页面会展示真实状态。
 
 参见 [环境评估](docs/windows-android-environment.md)、[架构决策](docs/architecture.md)、[准备计划](docs/superpowers/plans/2026-09-30-android-bootstrap.md)。
