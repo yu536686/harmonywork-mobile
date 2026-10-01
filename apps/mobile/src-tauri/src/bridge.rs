@@ -3,10 +3,24 @@ use reqwest::{header::COOKIE, Method};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::time::Duration;
+use std::sync::{Mutex, OnceLock};
 use tauri::State;
 use uuid::Uuid;
 
 const BRIDGE_ORIGIN: &str = "https://remote.harmonywatch.cn";
+static DEVICE_AUTH: OnceLock<Mutex<Option<(String, String)>>> = OnceLock::new();
+
+#[tauri::command]
+pub fn bridge_set_device(device_id: String, device_token: String) -> Result<(), String> {
+    let mut current = DEVICE_AUTH.get_or_init(|| Mutex::new(None)).lock().map_err(|_| "设备状态不可用")?;
+    if device_id.is_empty() && device_token.is_empty() { *current = None; return Ok(()); }
+    pairing_id(&device_id)?;
+    if device_token.len() != 43 || !device_token.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_') {
+        return Err("设备凭证无效".into());
+    }
+    *current = Some((device_id, device_token));
+    Ok(())
+}
 
 fn bridge_url(path: &str) -> String {
     format!("{BRIDGE_ORIGIN}{path}")
@@ -38,6 +52,12 @@ async fn request(
         .build()
         .map_err(|_| "无法初始化手机连接".to_string())?;
     let mut builder = client.request(method, bridge_url(path)).header(COOKIE, cookie);
+    if let Some((device_id, token)) = DEVICE_AUTH.get_or_init(|| Mutex::new(None))
+        .lock().map_err(|_| "设备状态不可用")?.clone() {
+        builder = builder.header("X-Harmony-Device-Id", device_id)
+            .header("X-Harmony-Device-Kind", "mobile")
+            .header("X-Harmony-Device-Token", token);
+    }
     if let Some(body) = body {
         builder = builder.json(&body);
     }
@@ -138,8 +158,9 @@ pub async fn bridge_sync_session(
 }
 
 #[tauri::command]
-pub async fn bridge_tasks(state: State<'_, AppState>) -> Result<Value, String> {
-    request(&state, Method::GET, "/api/mobile/tasks", None).await
+pub async fn bridge_tasks(state: State<'_, AppState>, mobile_device_id: String) -> Result<Value, String> {
+    let id = pairing_id(&mobile_device_id)?;
+    request(&state, Method::GET, &format!("/api/mobile/tasks?mobileDeviceId={id}"), None).await
 }
 
 #[tauri::command]

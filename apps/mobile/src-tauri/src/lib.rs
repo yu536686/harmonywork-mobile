@@ -18,6 +18,7 @@ pub fn run() {
             account::mobile_logout,
             chat::mobile_chat,
             bridge::bridge_devices,
+            bridge::bridge_set_device,
             bridge::bridge_claim_pairing,
             bridge::bridge_sync_session,
             bridge::bridge_tasks,

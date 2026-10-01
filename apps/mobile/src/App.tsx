@@ -17,6 +17,8 @@ const features: Record<Exclude<Sheet, null>, { title: string; intro: string; det
 };
 const errorText = (error: unknown) => typeof error === 'string' ? error : error instanceof Error ? error.message : '操作失败，请稍后重试';
 const dateLabel = (time: number) => new Date(time).toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' });
+const deviceKey = (accountId: string) => `harmony-work-mobile:device:${accountId}`;
+const deviceTokenKey = (accountId: string) => `harmony-work-mobile:device-token:${accountId}`;
 
 function App() {
   const [booting, setBooting] = useState(true);
@@ -34,6 +36,7 @@ function App() {
   const [chatError, setChatError] = useState<{ id: string; text: string } | null>(null);
   const [sheet, setSheet] = useState<Sheet>(null);
   const [devices, setDevices] = useState<LinkedDevice[]>([]);
+  const [mobileDeviceId, setMobileDeviceId] = useState('');
   const [tasks, setTasks] = useState<RemoteTask[]>([]);
   const [pairingText, setPairingText] = useState('');
   const [pairingError, setPairingError] = useState('');
@@ -45,15 +48,19 @@ function App() {
   const [selectedDesktopId, setSelectedDesktopId] = useState('');
   const [peerState, setPeerState] = useState<'connecting' | 'direct' | 'fallback'>('fallback');
   const peerRef = useRef<BridgePeer | null>(null);
-  const pendingTask = useRef<{ sessionId: string; idempotencyKey: string; prompt: string } | null>(null);
+  const pendingTask = useRef<{ sessionId: string; idempotencyKey: string; prompt: string; desktopDeviceId: string } | null>(null);
   const chatEnd = useRef<HTMLDivElement | null>(null);
   const active = sessions.find(session => session.id === activeId) ?? null;
   const sorted = [...sessions].sort((a, b) => b.updatedAt - a.updatedAt);
 
   useEffect(() => {
-    invoke<AccountView | null>('mobile_account').then(current => {
+    invoke<AccountView | null>('mobile_account').then(async current => {
       if (current) {
         accountId.current = current.id;
+        const deviceId = localStorage.getItem(deviceKey(current.id)) ?? '';
+        const deviceToken = localStorage.getItem(deviceTokenKey(current.id)) ?? '';
+        if (deviceId && deviceToken) await invoke('bridge_set_device', { deviceId, deviceToken });
+        setMobileDeviceId(localStorage.getItem(deviceKey(current.id)) ?? '');
         setSessions(loadSessions(current.id));
         setAccount(current);
       }
@@ -61,27 +68,27 @@ function App() {
   }, []);
   useEffect(() => { if (account) saveSessions(account.id, sessions); }, [account, sessions]);
   useEffect(() => {
-    if (!account) return;
+    if (!account || !devices.length) return;
     const timer = window.setTimeout(() => {
       for (const session of sessions) {
-        void invoke('bridge_sync_session', { session }).catch(() => undefined);
+        void invoke('bridge_sync_session', { session: { ...session, messages: session.messages.slice(-100) } }).catch(() => undefined);
       }
     }, 500);
     return () => window.clearTimeout(timer);
-  }, [account, sessions]);
+  }, [account, sessions, devices.length]);
   useEffect(() => {
     if (!account) return;
     void refreshDevices();
     void refreshTasks();
     const timer = window.setInterval(() => { void refreshTasks(); }, 10_000);
     return () => window.clearInterval(timer);
-  }, [account?.id]);
+  }, [account?.id, mobileDeviceId]);
   useEffect(() => {
     const device = devices.find(item => item.desktopDeviceId === selectedDesktopId);
     if (!account || !device || typeof RTCPeerConnection === 'undefined') return;
     const peer = new BridgePeer({
       desktopDeviceId: device.desktopDeviceId, mobileDeviceId: device.mobileDeviceId,
-      localDeviceId: device.mobileDeviceId, remoteDeviceId: device.desktopDeviceId, initiator: false,
+      localDeviceId: device.mobileDeviceId, remoteDeviceId: device.desktopDeviceId, initiator: true,
       sendSignal: (kind, payload) => invoke('bridge_send_signal', { desktopDeviceId: device.desktopDeviceId, mobileDeviceId: device.mobileDeviceId, senderDeviceId: device.mobileDeviceId, recipientDeviceId: device.desktopDeviceId, kind, payload }),
       pollSignals: after => invoke<{ signals: BridgeSignal[] }>('bridge_signals', { deviceId: device.mobileDeviceId, after }).then(result => result.signals),
       onHint: () => { void refreshTasks(); },
@@ -105,6 +112,10 @@ function App() {
     try {
       const current = await invoke<AccountView>('mobile_login', { email: email.trim(), password });
       accountId.current = current.id;
+      const deviceId = localStorage.getItem(deviceKey(current.id)) ?? '';
+      const deviceToken = localStorage.getItem(deviceTokenKey(current.id)) ?? '';
+      if (deviceId && deviceToken) await invoke('bridge_set_device', { deviceId, deviceToken });
+      setMobileDeviceId(localStorage.getItem(deviceKey(current.id)) ?? '');
       setSessions(loadSessions(current.id));
       setAccount(current);
       setView('home');
@@ -115,6 +126,7 @@ function App() {
 
   async function signOut() {
     await invoke('mobile_logout').catch(() => undefined);
+    await invoke('bridge_set_device', { deviceId: '', deviceToken: '' }).catch(() => undefined);
     accountId.current = null;
     setAccount(null);
     setSessions([]);
@@ -123,23 +135,35 @@ function App() {
     setSending(false);
     setChatError(null);
     setDevices([]);
+    setMobileDeviceId('');
     setTasks([]);
+    setSheet(null);
+    setPairingText('');
+    setSelectedDesktopId('');
     pendingTask.current = null;
     setView('home');
   }
 
   async function refreshDevices() {
+    const owner = accountId.current;
     try {
       const result = await invoke<{ devices: LinkedDevice[] }>('bridge_devices');
-      setDevices(result.devices);
-      setSelectedDesktopId(current => result.devices.some(device => device.desktopDeviceId === current)
-        ? current : result.devices[0]?.desktopDeviceId ?? '');
-    } catch { setDevices([]); }
+      if (!owner || owner !== accountId.current) return;
+      const ownId = localStorage.getItem(deviceKey(owner)) ?? '';
+      const own = result.devices.filter(device => device.mobileDeviceId === ownId);
+      setMobileDeviceId(ownId);
+      setDevices(own);
+      setSelectedDesktopId(current => own.some(device => device.desktopDeviceId === current)
+        ? current : own[0]?.desktopDeviceId ?? '');
+    } catch { if (owner === accountId.current) setDevices([]); }
   }
 
   async function refreshTasks() {
+    const owner = accountId.current;
     try {
-      const result = await invoke<{ tasks: RemoteTask[] }>('bridge_tasks');
+      if (!mobileDeviceId) return;
+      const result = await invoke<{ tasks: RemoteTask[] }>('bridge_tasks', { mobileDeviceId });
+      if (!owner || owner !== accountId.current) return;
       setTasks(result.tasks);
       setSessions(current => {
         let changed = false;
@@ -160,7 +184,12 @@ function App() {
     setPairingError('');
     try {
       const { pairingId, secret } = parsePairingCode(raw);
-      await invoke('bridge_claim_pairing', { pairingId, secret, mobileName: 'Harmony Work Android' });
+      const bound = await invoke<{ mobileDeviceId: string; deviceToken: string }>('bridge_claim_pairing', { pairingId, secret, mobileName: 'Harmony Work Android' });
+      if (!accountId.current) return;
+      localStorage.setItem(deviceKey(accountId.current), bound.mobileDeviceId);
+      localStorage.setItem(deviceTokenKey(accountId.current), bound.deviceToken);
+      await invoke('bridge_set_device', { deviceId: bound.mobileDeviceId, deviceToken: bound.deviceToken });
+      setMobileDeviceId(bound.mobileDeviceId);
       setPairingText('');
       await refreshDevices();
       setSheet(null);
@@ -180,14 +209,15 @@ function App() {
 
   async function submitRemoteTask(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const owner = accountId.current;
     const prompt = taskPrompt.trim();
     const device = devices.find(item => item.desktopDeviceId === selectedDesktopId);
     if (!prompt || !device) { setTaskError('请先绑定并选择一台 Windows 电脑'); return; }
     setTaskBusy(true);
     setTaskError('');
     try {
-      const request = pendingTask.current?.prompt === prompt ? pendingTask.current : {
-        sessionId: taskSessionId ?? crypto.randomUUID(), idempotencyKey: crypto.randomUUID(), prompt,
+      const request = pendingTask.current?.prompt === prompt && pendingTask.current.desktopDeviceId === device.desktopDeviceId ? pendingTask.current : {
+        sessionId: taskSessionId ?? crypto.randomUUID(), idempotencyKey: crypto.randomUUID(), prompt, desktopDeviceId: device.desktopDeviceId,
       };
       pendingTask.current = request;
       const existing = sessions.find(item => item.id === request.sessionId);
@@ -198,7 +228,7 @@ function App() {
       } : {
         id: request.sessionId, title: prompt.slice(0, 22), updatedAt: Date.now(), messages: [taskMessage],
       };
-      await invoke('bridge_sync_session', { session });
+      await invoke('bridge_sync_session', { session: { ...session, messages: session.messages.slice(-100) } });
       await invoke('bridge_create_task', {
         sessionId: request.sessionId,
         desktopDeviceId: device.desktopDeviceId,
@@ -206,9 +236,11 @@ function App() {
         idempotencyKey: request.idempotencyKey,
         prompt,
       });
+      if (!owner || owner !== accountId.current) return;
       setSessions(current => current.some(item => item.id === session.id) ? current.map(item => item.id === session.id ? session : item) : [session, ...current]);
       pendingTask.current = null;
       peerRef.current?.hint();
+      if (taskSessionId === activeId) setDraft('');
       setTaskPrompt('');
       setTaskSessionId(null);
       await refreshTasks();
