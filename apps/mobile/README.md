@@ -1,6 +1,8 @@
 # HarmonyWork Mobile Android 工程
 
-Tauri 2 + React + TypeScript 的 Android 工程基线。当前界面仍是框架默认演示页，仅用于验证构建链；账户对话、远端任务、Harvis、技能和记忆尚未接入。
+Tauri 2 + React + TypeScript 的 Android 客户端。当前已实现个人账户登录与加密模型配置解锁、手机独立的 Harmony Responses 轻量对话、扫码绑定 Windows、手机会话同步、远端任务提交和结果回收。Harvis 生图、技能远程管理和跨端记忆在界面中标明为后续能力，尚未接入执行接口。
+
+连接服务部署在 `remote.harmonywatch.cn`（直达 61.150.31.150 的 11.29 服务器）。扫码会为本机颁发独立设备凭证；会话与任务内容保存在该自建服务器的 PostgreSQL 中，模型 API Key 只在手机客户端 Rust 会话内解密。WebRTC 数据通道只用于低延迟更新提示，HTTPS 任务队列和结果接口始终是可靠路径。
 
 Windows 项目路径：`E:\harmony-work-mobile\apps\mobile`。已用 `create-tauri-app` 4.7.4 生成工程，并运行 `tauri android init`。Android 工程位于 `src-tauri\gen\android`。
 
@@ -12,4 +14,4 @@ E:\harmony-work-mobile\scripts\windows\Build-AndroidDebug.cmd
 
 脚本在当前进程加载 Visual Studio C++ Build Tools，使用 `C:\Android` 下的 JDK、SDK、NDK、Gradle 和独立 Cargo 缓存；不会改动桌面项目的全局 Cargo 镜像配置。构建前先确保机器有足够可用内存。
 
-真机验收仍需要将 Android 手机连接到该 Windows 并授权 USB 调试，或将生成的 APK 安装到测试设备。仅前端构建/Gradle 打包通过不等于移动端功能已实现。
+调试 APK 位于 `src-tauri\gen\android\app\build\outputs\apk\universal\debug\app-universal-debug.apk`。MuMu 模拟器可通过 `C:\Android\Sdk\platform-tools\adb.exe -s emulator-5554 install -r <APK 路径>` 安装。当前已验证编译、安装与登录页启动；完整的账号登录、扫码及真实任务闭环仍需在已登录的手机和 Windows 客户端上共同验收。
