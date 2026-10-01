@@ -31,6 +31,8 @@ uuid = "1"
 
 [target.'cfg(target_os = "android")'.dependencies]
 tauri-plugin-barcode-scanner = "2"
+jni = "0.21"
+ndk-context = "0.1"
 
 
 # Read the optimization guideline for more details: https://tauri.app/concept/size/#cargo-configuration

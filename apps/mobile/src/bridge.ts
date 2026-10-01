@@ -20,14 +20,23 @@ export type RemoteTask = {
 };
 
 export function parsePairingCode(raw: string): PairingCode {
-  let url: URL;
-  try { url = new URL(raw.trim()); }
-  catch { throw new Error('请扫描桌面端显示的 Harmony Work 配对二维码'); }
-  if (url.protocol !== 'harmonywork:' || url.hostname !== 'pair' || url.pathname !== '' && url.pathname !== '/') {
-    throw new Error('这不是 Harmony Work 的配对二维码');
+  const value = raw.trim();
+  let params: URLSearchParams;
+  if (value.startsWith('harmonywork://')) {
+    let url: URL;
+    try { url = new URL(value); }
+    catch { throw new Error('配对内容格式无效，请从桌面连接向导重新复制'); }
+    if (url.protocol !== 'harmonywork:' || url.hostname !== 'pair' || url.pathname !== '' && url.pathname !== '/') {
+      throw new Error('这不是 Harmony Work 的配对二维码');
+    }
+    params = url.searchParams;
+  } else if (/^(?:id|pairingId)=/.test(value)) {
+    params = new URLSearchParams(value.replace(/\r?\n/g, '&'));
+  } else {
+    throw new Error('请粘贴桌面端「复制配对内容」中的完整文本');
   }
-  const pairingId = url.searchParams.get('id') ?? '';
-  const secret = url.searchParams.get('secret') ?? '';
+  const pairingId = params.get('id') ?? params.get('pairingId') ?? '';
+  const secret = params.get('secret') ?? '';
   if (!uuidPattern.test(pairingId) || !secretPattern.test(secret)) {
     throw new Error('配对二维码内容无效');
   }

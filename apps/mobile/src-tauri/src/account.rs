@@ -9,11 +9,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{sync::Mutex, time::Duration};
 use tauri::State;
+use crate::vault;
 use zeroize::Zeroize;
 
 const ACCOUNT_API: &str = "https://portal.harmonywatch.cn";
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountView {
     pub id: String,
@@ -22,6 +23,7 @@ pub struct AccountView {
     pub model: String,
 }
 
+#[derive(Serialize, Deserialize)]
 pub(crate) struct MobileSession {
     pub account: AccountView,
     pub cookie: String,
@@ -169,6 +171,10 @@ pub async fn mobile_login(
     password.zeroize();
     let session = result?;
     let account = session.account.clone();
+    let mut serialized = serde_json::to_string(&session).map_err(|_| "无法保存账户会话")?;
+    let saved = vault::save(&serialized);
+    serialized.zeroize();
+    saved?;
     *state.session.lock().map_err(|_| "账户状态不可用")? = Some(session);
     Ok(account)
 }
@@ -239,16 +245,23 @@ async fn login_inner(email: &str, password: &str) -> Result<MobileSession, Strin
 
 #[tauri::command]
 pub fn mobile_account(state: State<'_, AppState>) -> Result<Option<AccountView>, String> {
-    Ok(state
-        .session
-        .lock()
-        .map_err(|_| "账户状态不可用")?
-        .as_ref()
-        .map(|session| session.account.clone()))
+    let mut current = state.session.lock().map_err(|_| "账户状态不可用")?;
+    if current.is_none() {
+        if let Some(mut serialized) = vault::load()? {
+            let restored = serde_json::from_str::<MobileSession>(&serialized);
+            serialized.zeroize();
+            match restored {
+                Ok(session) => *current = Some(session),
+                Err(_) => { vault::clear()?; }
+            }
+        }
+    }
+    Ok(current.as_ref().map(|session| session.account.clone()))
 }
 
 #[tauri::command]
 pub fn mobile_logout(state: State<'_, AppState>) -> Result<(), String> {
+    vault::clear()?;
     *state.session.lock().map_err(|_| "账户状态不可用")? = None;
     Ok(())
 }
