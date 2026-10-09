@@ -4,6 +4,7 @@ export type ChatMessage = {
   id: string;
   role: MessageRole;
   content: string;
+  seq?: number;
 };
 
 export type ChatSession = {

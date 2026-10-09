@@ -42,3 +42,4 @@ html.scanner-active,html.scanner-active body,html.scanner-active #root{backgroun
 .scanner-bottom{width:100%;display:flex;flex-direction:column;align-items:center;gap:10px;padding:18px 18px 28px;background:linear-gradient(#18162600,#181626d9)}
 .scanner-bottom button{min-height:46px;min-width:140px;border:1px solid #ffffff99;border-radius:12px;background:#181626a3;color:#fff;font-weight:700}
 .scanner-bottom span{font-size:11px;color:#fff}
+.task-link{display:block;width:100%;text-align:left;cursor:pointer;color:inherit}.task-link small{display:block;margin-top:10px;color:#7653e8;font-weight:650}.linked-devices select{width:100%;margin-top:6px;border:1px solid #ddd5ec;border-radius:10px;background:#fff;padding:10px;color:#251d35;font:inherit}

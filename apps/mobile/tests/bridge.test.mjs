@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parsePairingCode } from '../src/bridge.ts';
+import { parsePairingCode, selectPreferredDesktop } from '../src/bridge.ts';
 
 test('accepts only a local app pairing URI and a bounded secret', () => {
   const id = '3ecc3126-67a5-4e33-bfad-f1fe2308ef9e';
@@ -40,4 +40,14 @@ test('accepts the desktop QR on WebViews that parse custom schemes as opaque pat
   } finally {
     globalThis.URL = NativeURL;
   }
+});
+
+test('a newly paired desktop becomes the default while an explicit selection survives refresh', () => {
+  const devices = [
+    { desktopDeviceId: 'new' },
+    { desktopDeviceId: 'old' },
+  ];
+  assert.equal(selectPreferredDesktop(devices, 'old', 'old', true), 'new');
+  assert.equal(selectPreferredDesktop(devices, '', 'old', false), 'old');
+  assert.equal(selectPreferredDesktop(devices, 'missing', 'missing', false), 'new');
 });

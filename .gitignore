@@ -9,6 +9,7 @@ target/
 Thumbs.db
 *.log
 reports/
+artifacts/
 .env
 .env.*
 !.env.example

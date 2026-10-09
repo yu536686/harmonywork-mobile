@@ -19,6 +19,16 @@ export type RemoteTask = {
   updatedAt: string;
 };
 
+export function selectPreferredDesktop(
+  devices: Pick<LinkedDevice, 'desktopDeviceId'>[], current: string,
+  stored: string, preferLatest: boolean,
+): string {
+  if (preferLatest) return devices[0]?.desktopDeviceId ?? '';
+  if (devices.some(device => device.desktopDeviceId === current)) return current;
+  if (devices.some(device => device.desktopDeviceId === stored)) return stored;
+  return devices[0]?.desktopDeviceId ?? '';
+}
+
 export function parsePairingCode(raw: string): PairingCode {
   const value = raw.trim();
   let params: URLSearchParams;

@@ -158,6 +158,104 @@ pub async fn bridge_sync_session(
 }
 
 #[tauri::command]
+pub async fn bridge_create_session(state: State<'_, AppState>, session_id: String, title: String) -> Result<Value, String> {
+    pairing_id(&session_id)?;
+    if title.trim().is_empty() || title.chars().count() > 120 { return Err("会话标题无效".into()); }
+    request(&state, Method::POST, "/api/mobile/sessions", Some(json!({"id":session_id,"title":title}))).await
+}
+
+#[tauri::command]
+pub async fn bridge_list_sessions(
+    state: State<'_, AppState>, mobile_device_id: String,
+    before_cursor: Option<String>, before_id: Option<String>,
+) -> Result<Value, String> {
+    let id = pairing_id(&mobile_device_id)?;
+    let mut path = format!("/api/mobile/sessions?mobileDeviceId={id}");
+    match (before_cursor, before_id) {
+        (Some(cursor), Some(before_id)) => {
+            pairing_id(&before_id)?;
+            if cursor.len() > 40 || !cursor.bytes().all(|byte|
+                byte.is_ascii_digit() || matches!(byte, b'-' | b':' | b'T' | b'.' | b'Z')) {
+                return Err("会话分页位置无效".into());
+            }
+            path.push_str(&format!("&before={cursor}&beforeId={before_id}"));
+        }
+        (None, None) => {}
+        _ => return Err("会话分页位置不完整".into()),
+    }
+    request(&state, Method::GET, &path, None).await
+}
+
+#[tauri::command]
+pub async fn bridge_append_message(
+    state: State<'_, AppState>, session_id: String, message_id: String,
+    role: String, content: String, turn_id: Option<String>,
+) -> Result<Value, String> {
+    let id = pairing_id(&session_id)?;
+    pairing_id(&message_id)?;
+    if let Some(ref turn) = turn_id { pairing_id(turn)?; }
+    if !matches!(role.as_str(), "user" | "assistant") || content.is_empty() || content.chars().count() > 8_000 {
+        return Err("会话消息格式无效".into());
+    }
+    let mut body = json!({"id":message_id,"role":role,"content":content});
+    if let Some(turn) = turn_id { body["turnId"] = json!(turn); }
+    request(&state, Method::POST, &format!("/api/mobile/sessions/{id}/messages"), Some(body)).await
+}
+
+#[tauri::command]
+pub async fn bridge_messages(state: State<'_, AppState>, session_id: String, after_seq: u64) -> Result<Value, String> {
+    let id = pairing_id(&session_id)?;
+    request(&state, Method::GET, &format!("/api/mobile/sessions/{id}/messages?afterSeq={after_seq}"), None).await
+}
+
+#[tauri::command]
+pub async fn bridge_claim_turn(
+    state: State<'_, AppState>, session_id: String, turn_id: String, initiating_message_id: String,
+) -> Result<Value, String> {
+    let id = pairing_id(&session_id)?;
+    pairing_id(&turn_id)?;
+    pairing_id(&initiating_message_id)?;
+    request(&state, Method::POST, &format!("/api/mobile/sessions/{id}/turns"),
+        Some(json!({"id":turn_id,"initiatingMessageId":initiating_message_id}))).await
+}
+
+#[tauri::command]
+pub async fn bridge_start_turn(
+    state: State<'_, AppState>, session_id: String, turn_id: String,
+    message_id: String, content: String,
+) -> Result<Value, String> {
+    let id = pairing_id(&session_id)?;
+    pairing_id(&turn_id)?;
+    pairing_id(&message_id)?;
+    if content.trim().is_empty() || content.chars().count() > 8_000 {
+        return Err("会话消息格式无效".into());
+    }
+    request(&state, Method::POST, &format!("/api/mobile/sessions/{id}/turns/start"),
+        Some(json!({"turnId":turn_id,"message":{"id":message_id,"content":content}}))).await
+}
+
+#[tauri::command]
+pub async fn bridge_active_turn(state: State<'_, AppState>, session_id: String) -> Result<Value, String> {
+    let id = pairing_id(&session_id)?;
+    request(&state, Method::GET, &format!("/api/mobile/sessions/{id}/turns/active"), None).await
+}
+
+#[tauri::command]
+pub async fn bridge_turn_heartbeat(state: State<'_, AppState>, session_id: String, turn_id: String) -> Result<Value, String> {
+    let id = pairing_id(&session_id)?;
+    let turn = pairing_id(&turn_id)?;
+    request(&state, Method::POST, &format!("/api/mobile/sessions/{id}/turns/{turn}/heartbeat"), Some(json!({}))).await
+}
+
+#[tauri::command]
+pub async fn bridge_complete_turn(state: State<'_, AppState>, session_id: String, turn_id: String, status: String) -> Result<Value, String> {
+    let id = pairing_id(&session_id)?;
+    let turn = pairing_id(&turn_id)?;
+    if !matches!(status.as_str(), "completed" | "failed") { return Err("轮次状态无效".into()); }
+    request(&state, Method::POST, &format!("/api/mobile/sessions/{id}/turns/{turn}/complete"), Some(json!({"status":status}))).await
+}
+
+#[tauri::command]
 pub async fn bridge_tasks(state: State<'_, AppState>, mobile_device_id: String) -> Result<Value, String> {
     let id = pairing_id(&mobile_device_id)?;
     request(&state, Method::GET, &format!("/api/mobile/tasks?mobileDeviceId={id}"), None).await
@@ -193,6 +291,8 @@ pub async fn bridge_create_task(
     mobile_device_id: String,
     idempotency_key: String,
     prompt: String,
+    turn_id: Option<String>,
+    tool_call_id: Option<String>,
 ) -> Result<Value, String> {
     pairing_id(&session_id)?;
     pairing_id(&desktop_device_id)?;
@@ -200,17 +300,25 @@ pub async fn bridge_create_task(
     if prompt.trim().is_empty() || prompt.chars().count() > 8_000 {
         return Err("远端任务内容须为 1–8000 字".into());
     }
+    if turn_id.is_some() != tool_call_id.is_some() { return Err("电脑任务轮次信息不完整".into()); }
+    if let Some(ref turn) = turn_id { pairing_id(turn)?; }
+    if let Some(ref call) = tool_call_id { if call.is_empty() || call.len() > 128 { return Err("工具调用编号无效".into()); } }
+    let mut body = json!({
+        "sessionId":session_id,
+        "desktopDeviceId":desktop_device_id,
+        "mobileDeviceId":mobile_device_id,
+        "idempotencyKey":idempotency_key,
+        "prompt":prompt
+    });
+    if let (Some(turn), Some(call)) = (turn_id, tool_call_id) {
+        body["turnId"] = json!(turn);
+        body["toolCallId"] = json!(call);
+    }
     request(
         &state,
         Method::POST,
         "/api/mobile/tasks",
-        Some(json!({
-            "sessionId":session_id,
-            "desktopDeviceId":desktop_device_id,
-            "mobileDeviceId":mobile_device_id,
-            "idempotencyKey":idempotency_key,
-            "prompt":prompt
-        })),
+        Some(body),
     )
     .await
 }
