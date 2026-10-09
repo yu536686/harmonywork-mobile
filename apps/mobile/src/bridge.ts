@@ -23,13 +23,9 @@ export function parsePairingCode(raw: string): PairingCode {
   const value = raw.trim();
   let params: URLSearchParams;
   if (value.startsWith('harmonywork://')) {
-    let url: URL;
-    try { url = new URL(value); }
-    catch { throw new Error('配对内容格式无效，请从桌面连接向导重新复制'); }
-    if (url.protocol !== 'harmonywork:' || url.hostname !== 'pair' || url.pathname !== '' && url.pathname !== '/') {
-      throw new Error('这不是 Harmony Work 的配对二维码');
-    }
-    params = url.searchParams;
+    const match = /^harmonywork:\/\/pair\/?\?([^#]*)$/.exec(value);
+    if (!match) throw new Error('这不是 Harmony Work 的配对二维码');
+    params = new URLSearchParams(match[1]);
   } else if (/^(?:id|pairingId)=/.test(value)) {
     params = new URLSearchParams(value.replace(/\r?\n/g, '&'));
   } else {
