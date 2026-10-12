@@ -13,7 +13,7 @@ export type RemoteTask = {
   sessionId: string;
   desktopDeviceId: string;
   prompt: string;
-  status: 'queued' | 'claimed' | 'succeeded' | 'failed';
+  status: 'queued' | 'claimed' | 'succeeded' | 'failed' | 'cancelled';
   result: string | null;
   createdAt: string;
   updatedAt: string;

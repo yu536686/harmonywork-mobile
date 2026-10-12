@@ -103,6 +103,15 @@ pub async fn bridge_devices(state: State<'_, AppState>) -> Result<Value, String>
 }
 
 #[tauri::command]
+pub async fn bridge_unlink(
+    state: State<'_, AppState>, desktop_device_id: String, mobile_device_id: String,
+) -> Result<Value, String> {
+    let desktop_id = pairing_id(&desktop_device_id)?;
+    let mobile_id = pairing_id(&mobile_device_id)?;
+    request(&state, Method::DELETE, &format!("/api/mobile/links/{desktop_id}/{mobile_id}"), None).await
+}
+
+#[tauri::command]
 pub async fn bridge_claim_pairing(
     state: State<'_, AppState>,
     pairing_id: String,

@@ -49,6 +49,7 @@ function App() {
   const [pairingText, setPairingText] = useState('');
   const [pairingError, setPairingError] = useState('');
   const [pairingBusy, setPairingBusy] = useState(false);
+  const [unlinkingDesktopId, setUnlinkingDesktopId] = useState('');
   const [scanning, setScanning] = useState(false);
   const [selectedDesktopId, setSelectedDesktopId] = useState('');
   const [peerState, setPeerState] = useState<'connecting' | 'direct' | 'fallback'>('fallback');
@@ -61,7 +62,9 @@ function App() {
   const syncingTaskEvents = useRef(new Set<string>());
   const syncingChanges = useRef(false);
   const sessionsRef = useRef<ChatSession[]>([]);
+  const tasksRef = useRef<RemoteTask[]>([]);
   sessionsRef.current = sessions;
+  tasksRef.current = tasks;
   const chatEnd = useRef<HTMLDivElement | null>(null);
   const active = sessions.find(session => session.id === activeId) ?? null;
   const activePending = turns.find(turn => turn.sessionId === activeId);
@@ -100,12 +103,16 @@ function App() {
     if (!account) return;
     void refreshDevices();
     void refreshTasks();
-    if (mobileDeviceId) void refreshSharedSessions();
-    const timer = window.setInterval(() => { void refreshTasks(); if (mobileDeviceId) void refreshSharedSessions(); }, 10_000);
+    if (mobileDeviceId && devices.length) void refreshSharedSessions();
+    const timer = window.setInterval(() => {
+      void refreshDevices();
+      void refreshTasks();
+      if (mobileDeviceId && devices.length) void refreshSharedSessions();
+    }, 10_000);
     return () => window.clearInterval(timer);
-  }, [account?.id, mobileDeviceId]);
+  }, [account?.id, mobileDeviceId, devices.length]);
   useEffect(() => {
-    if (!account || !mobileDeviceId || !activeId) return;
+    if (!account || !mobileDeviceId || !devices.length || !activeId) return;
     const refresh = () => {
       void refreshTaskEvents(activeId);
       void refreshActiveMessages(activeId);
@@ -120,9 +127,9 @@ function App() {
       window.removeEventListener('focus', onForeground);
       document.removeEventListener('visibilitychange', onForeground);
     };
-  }, [account?.id, mobileDeviceId, activeId]);
+  }, [account?.id, mobileDeviceId, devices.length, activeId]);
   useEffect(() => {
-    if (!account || !mobileDeviceId) return;
+    if (!account || !mobileDeviceId || !devices.length) return;
     let closed = false;
     let unlisten: (() => void) | undefined;
     void listen<number>('mobile_bridge_change_hint', () => { void refreshChanges(); })
@@ -144,7 +151,7 @@ function App() {
       window.removeEventListener('focus', onForeground);
       window.clearInterval(fallback);
     };
-  }, [account?.id, mobileDeviceId]);
+  }, [account?.id, mobileDeviceId, devices.length]);
   useEffect(() => {
     const device = devices.find(item => item.desktopDeviceId === selectedDesktopId);
     if (!account || !device || typeof RTCPeerConnection === 'undefined') return;
@@ -206,6 +213,7 @@ function App() {
     taskEventsRef.current = {};
     setSheet(null);
     setPairingText('');
+    setUnlinkingDesktopId('');
     setSelectedDesktopId('');
     syncState.current = { cursors: {}, pendingTurns: [], answeredTurns: [] };
     setTurns([]);
@@ -219,20 +227,28 @@ function App() {
       if (!owner || owner !== accountId.current) return;
       const ownId = localStorage.getItem(deviceKey(owner)) ?? '';
       const own = result.devices.filter(device => device.mobileDeviceId === ownId);
+      const accessible = new Set(own.map(device => device.desktopDeviceId));
+      const inaccessibleTasks = new Set(tasksRef.current
+        .filter(task => !accessible.has(task.desktopDeviceId)).map(task => task.id));
+      if (inaccessibleTasks.size) persistSync({
+        ...syncState.current,
+        pendingTurns: syncState.current.pendingTurns.filter(turn => !turn.taskId || !inaccessibleTasks.has(turn.taskId)),
+      });
       setMobileDeviceId(ownId);
-      setDevices(own);
+      setDevices(current => JSON.stringify(current) === JSON.stringify(own) ? current : own);
+      setTasks(current => current.filter(task => accessible.has(task.desktopDeviceId)));
       setSelectedDesktopId(current => {
         const selected = selectPreferredDesktop(own, current, localStorage.getItem(preferredDesktopKey(owner)) ?? '', preferLatest);
         if (selected) localStorage.setItem(preferredDesktopKey(owner), selected);
         return selected;
       });
-    } catch { if (owner === accountId.current) setDevices([]); }
+    } catch { /* Keep the last verified link list during a coordinator outage. */ }
   }
 
   async function refreshTasks() {
     const owner = accountId.current;
     try {
-      if (!mobileDeviceId) return;
+      if (!mobileDeviceId || !devices.length) { setTasks([]); return; }
       const result = await invoke<{ tasks: RemoteTask[] }>('bridge_tasks', { mobileDeviceId });
       if (!owner || owner !== accountId.current) return;
       setTasks(result.tasks);
@@ -274,7 +290,10 @@ function App() {
         }
         if (page.changes.length < 100) break;
       }
-    } catch { /* Periodic refresh resumes when the coordinator is available. */ }
+    } catch (error) {
+      if (errorText(error).includes('403')) void refreshDevices();
+      /* Periodic refresh resumes when the coordinator is available. */
+    }
     finally { syncingChanges.current = false; }
   }
 
@@ -347,6 +366,20 @@ function App() {
       setSheet(null);
     } catch (error) { setPairingError(errorText(error)); }
     finally { setPairingBusy(false); }
+  }
+
+  async function unlinkDesktop(device: LinkedDevice) {
+    if (!window.confirm(`解除与“${device.desktopName}”的绑定？该电脑将不能继续执行此手机的任务。历史会话仍保存在手机。`)) return;
+    setUnlinkingDesktopId(device.desktopDeviceId);
+    setPairingError('');
+    try {
+      await invoke('bridge_unlink', {
+        desktopDeviceId: device.desktopDeviceId, mobileDeviceId: device.mobileDeviceId,
+      });
+      await refreshDevices();
+      await refreshTasks();
+    } catch (error) { setPairingError(errorText(error)); }
+    finally { setUnlinkingDesktopId(''); }
   }
 
   async function scanPairing() {
@@ -510,7 +543,7 @@ function App() {
   async function runChat(id: string, messages: ChatMessage[]) {
     const owner = accountId.current;
     if (!owner || !messages.length) return;
-    const bound = !!localStorage.getItem(deviceKey(owner));
+    const bound = devices.length > 0;
     let turn = syncState.current.pendingTurns.find(item => item.sessionId === id && item.userMessageId === messages.at(-1)?.id);
     if (turn && processingTurns.current.has(turn.turnId)) return;
     if (turn?.finalText) { await finishTurn(turn, turn.finalText); return; }
@@ -653,11 +686,11 @@ function App() {
   return <div className="app-shell"><main className={`app-content ${view === 'chat' ? 'chat-content' : ''}`}>
     {view === 'home' && <div className="page-enter"><header className="home-header"><div className="top-row"><div className="app-brand"><span className="brand-mark">H</span><b>Harmony Work</b></div><button className="avatar-button" onClick={() => setView('mine')} aria-label="我的账户">{account.name.slice(0, 1)}</button></div><div className="greeting"><span>欢迎回来，{account.name}</span><h1>今天想和<span>小亨</span>做什么？</h1></div></header><div className="home-body"><section className="hero-card"><div className="hero-top"><span>YOUR WORKSPACE</span><span className="hero-status">手机已就绪</span></div><h2>一个会话开始，<br />手机电脑协作完成。</h2><p>小亨在手机上理解需求，按需调用已绑定电脑执行，并在同一会话里给出答复。</p><button onClick={startChat}>开始对话 <Icon name="arrow" size={17} /></button></section><div className="section-heading"><h2>快捷开始</h2><span>按需进入</span></div><div className="quick-grid"><button className="quick-card" onClick={() => setSheet('harvis')}><span className="icon-tile peach"><Icon name="image" /></span><b>Harvis 生图</b><small>图片创作入口</small></button><button className="quick-card" onClick={() => setView('tasks')}><span className="icon-tile blue"><Icon name="tasks" /></span><b>我的任务</b><small>查看远端接入进度</small></button><button className="quick-card" onClick={() => setSheet('skills')}><span className="icon-tile purple"><Icon name="puzzle" /></span><b>技能管理</b><small>远程技能入口</small></button><button className="quick-card" onClick={() => setSheet('memory')}><span className="icon-tile green"><Icon name="memory" /></span><b>记忆</b><small>个人记忆入口</small></button></div><div className="section-heading"><h2>最近对话</h2><button onClick={() => setView('conversations')}>查看全部 <Icon name="arrow" size={15} /></button></div>{sorted.length ? <button className="recent-card" onClick={() => openChat(sorted[0].id)}><span className="icon-tile purple"><Icon name="chat" /></span><span><b>{sorted[0].title}</b><small>{sorted[0].messages.at(-1)?.content.slice(0, 35) || '刚创建的对话'}</small></span><Icon name="arrow" size={17} /></button> : <button className="recent-empty" onClick={startChat}>还没有对话。和小亨说第一句话 <Icon name="arrow" size={16} /></button>}<div className="section-heading"><h2>我的设备</h2></div><button className="device-card" onClick={() => setSheet('device')}><span className="icon-tile gray"><Icon name="monitor" /></span><span><b>{devices.length ? devices[0].desktopName : "电脑尚未连接"}</b><small>{devices.length ? `已绑定 · ${peerState === 'direct' ? 'P2P 直连' : '服务器保障'}` : "手机对话可独立使用"}</small></span><Icon name="arrow" size={17} /></button></div></div>}
     {view === 'conversations' && <div className="page-enter"><header className="page-header"><h1>对话</h1><button className="icon-button" onClick={startChat} aria-label="新建对话"><Icon name="plus" /></button></header><div className="page-body"><p className="section-caption">最近对话</p>{sorted.length ? sorted.map(session => <div className="conversation-row" key={session.id}><button onClick={() => openChat(session.id)}><span className="icon-tile purple"><Icon name="chat" /></span><span className="conversation-text"><b>{session.title}</b><small>{session.messages.at(-1)?.content.slice(0, 45) || '开始和小亨交流'}</small></span><time>{dateLabel(session.updatedAt)}</time></button><button className="row-delete" onClick={() => deleteChat(session.id)} aria-label={`删除${session.title}`}><Icon name="trash" size={17} /></button></div>) : <div className="empty-state"><span className="icon-tile purple"><Icon name="chat" /></span><h2>从一个想法开始</h2><p>和小亨讨论、整理、规划。手机不连接电脑也能使用。</p><button className="primary-button" onClick={startChat}>开始新对话 <Icon name="arrow" size={17} /></button></div>}</div></div>}
-    {view === 'chat' && active && <div className="chat-page page-enter"><header className="chat-header"><button className="icon-button plain" onClick={() => setView('conversations')} aria-label="返回对话列表"><Icon name="back" /></button><div><h1>{active.title}</h1><span><i className="green-dot" />小亨 · {mobileDeviceId ? "双端共享" : "手机对话"}</span></div><button className="icon-button plain" onClick={() => deleteChat(active.id)} aria-label="删除对话"><Icon name="trash" size={19} /></button></header><div className="messages"><div className="chat-date">{mobileDeviceId ? "双端共享会话" : "手机本地会话"}</div>{active.messages.length === 0 && <div className="chat-welcome"><span className="agent-symbol"><Icon name="spark" size={22} /></span><h2>你好，我是小亨。</h2><p>可以聊想法、整理资料、拟定计划。需要电脑环境时，我会在这个会话中调用已绑定的 Windows 电脑，并回来给你答复。</p></div>}{renderChatMessages(active)}{sending && <div className="agent-message"><div className="agent-label"><Icon name="spark" size={14} /> 小亨</div><div className="message assistant-message typing" aria-label="小亨正在回复"><span /><span /><span /></div></div>}{activePending && <div className="retry-panel" role="status"><span>{chatError?.id === active.id ? chatError.text : activePending.status === "queued" ? "等待同步并开始处理…" : activePending.status === "working" ? "电脑正在执行，完成后小亨会在这里回复。" : activePending.status === "summarizing" ? "电脑已返回，小亨正在整理答复…" : activePending.status === "failed" ? "处理暂停，可重试。" : "小亨正在思考…"}</span>{activePending.status === "failed" || activePending.status === "queued" ? <button onClick={() => void runChat(active.id, activePending.contextMessages ?? active.messages)}>重试</button> : null}</div>}{!activePending && !sending && active.messages.at(-1)?.role === "user" && <div className="retry-panel" role="status"><span>{chatError?.id === active.id ? chatError.text : "这条消息尚未收到回复。"}</span><button onClick={() => void runChat(active.id, active.messages)}>重试</button></div>}<div ref={chatEnd} /></div><form className="composer" onSubmit={sendMessage}><textarea aria-label="给小亨发送消息" value={draft} onChange={event => setDraft(event.target.value)} placeholder={activePending ? "等待上一轮完成后继续对话…" : "给小亨发送消息…"} maxLength={8000} rows={2} disabled={sending || !!activePending} /><div className="composer-bottom"><span><Icon name="spark" size={14} /> 小亨按需调用电脑</span><button type="submit" disabled={sending || !!activePending || !draft.trim()} aria-label="发送消息"><Icon name="send" size={19} /></button></div></form></div>}
-    {view === 'tasks' && <div className="page-enter"><header className="page-header"><h1>任务</h1></header><div className="page-body"><section className="remote-panel"><span className="section-caption">会话中的电脑工作</span><h2>在同一个会话中完成</h2><p>向小亨正常发送消息。需要电脑环境时，小亨会调用已绑定的 Windows 电脑，并把结果整理回原会话。</p>{!devices.length && <button className="secondary-button" onClick={() => setSheet('device')}>连接 Windows 电脑 <Icon name="arrow" size={17} /></button>}</section><div className="section-heading"><h2>执行进度</h2><button onClick={() => void refreshTasks()}>刷新</button></div>{tasks.length ? tasks.map(task => <button className="remote-task-card task-link" key={task.id} onClick={() => openChat(task.sessionId)}><div><b>{task.prompt}</b><span className={`task-status status-${task.status}`}>{task.status === 'succeeded' ? '已完成' : task.status === 'failed' ? '执行失败' : task.status === 'claimed' ? '执行中' : '等待电脑'}</span></div><small>查看原会话 →</small></button>) : <p className="muted-note">暂无电脑任务。直接开始对话，小亨会判断何时需要电脑。</p>}</div></div>}
+    {view === 'chat' && active && <div className="chat-page page-enter"><header className="chat-header"><button className="icon-button plain" onClick={() => setView('conversations')} aria-label="返回对话列表"><Icon name="back" /></button><div><h1>{active.title}</h1><span><i className="green-dot" />小亨 · {devices.length ? "双端共享" : "手机对话"}</span></div><button className="icon-button plain" onClick={() => deleteChat(active.id)} aria-label="删除对话"><Icon name="trash" size={19} /></button></header><div className="messages"><div className="chat-date">{devices.length ? "双端共享会话" : "手机本地会话"}</div>{active.messages.length === 0 && <div className="chat-welcome"><span className="agent-symbol"><Icon name="spark" size={22} /></span><h2>你好，我是小亨。</h2><p>可以聊想法、整理资料、拟定计划。需要电脑环境时，我会在这个会话中调用已绑定的 Windows 电脑，并回来给你答复。</p></div>}{renderChatMessages(active)}{sending && <div className="agent-message"><div className="agent-label"><Icon name="spark" size={14} /> 小亨</div><div className="message assistant-message typing" aria-label="小亨正在回复"><span /><span /><span /></div></div>}{activePending && <div className="retry-panel" role="status"><span>{chatError?.id === active.id ? chatError.text : activePending.status === "queued" ? "等待同步并开始处理…" : activePending.status === "working" ? "电脑正在执行，完成后小亨会在这里回复。" : activePending.status === "summarizing" ? "电脑已返回，小亨正在整理答复…" : activePending.status === "failed" ? "处理暂停，可重试。" : "小亨正在思考…"}</span>{activePending.status === "failed" || activePending.status === "queued" ? <button onClick={() => void runChat(active.id, activePending.contextMessages ?? active.messages)}>重试</button> : null}</div>}{!activePending && !sending && active.messages.at(-1)?.role === "user" && <div className="retry-panel" role="status"><span>{chatError?.id === active.id ? chatError.text : "这条消息尚未收到回复。"}</span><button onClick={() => void runChat(active.id, active.messages)}>重试</button></div>}<div ref={chatEnd} /></div><form className="composer" onSubmit={sendMessage}><textarea aria-label="给小亨发送消息" value={draft} onChange={event => setDraft(event.target.value)} placeholder={activePending ? "等待上一轮完成后继续对话…" : "给小亨发送消息…"} maxLength={8000} rows={2} disabled={sending || !!activePending} /><div className="composer-bottom"><span><Icon name="spark" size={14} /> 小亨按需调用电脑</span><button type="submit" disabled={sending || !!activePending || !draft.trim()} aria-label="发送消息"><Icon name="send" size={19} /></button></div></form></div>}
+    {view === 'tasks' && <div className="page-enter"><header className="page-header"><h1>任务</h1></header><div className="page-body"><section className="remote-panel"><span className="section-caption">会话中的电脑工作</span><h2>在同一个会话中完成</h2><p>向小亨正常发送消息。需要电脑环境时，小亨会调用已绑定的 Windows 电脑，并把结果整理回原会话。</p>{!devices.length && <button className="secondary-button" onClick={() => setSheet('device')}>连接 Windows 电脑 <Icon name="arrow" size={17} /></button>}</section><div className="section-heading"><h2>执行进度</h2><button onClick={() => void refreshTasks()}>刷新</button></div>{tasks.length ? tasks.map(task => <button className="remote-task-card task-link" key={task.id} onClick={() => openChat(task.sessionId)}><div><b>{task.prompt}</b><span className={`task-status status-${task.status}`}>{task.status === 'succeeded' ? '已完成' : task.status === 'failed' ? '执行失败' : task.status === 'cancelled' ? '已取消' : task.status === 'claimed' ? '执行中' : '等待电脑'}</span></div><small>查看原会话 →</small></button>) : <p className="muted-note">暂无电脑任务。直接开始对话，小亨会判断何时需要电脑。</p>}</div></div>}
     {view === 'mine' && <div className="page-enter"><header className="page-header"><h1>我的</h1></header><div className="profile-card"><span className="profile-avatar">{account.name.slice(0, 1)}</span><div><b>{account.name}</b><small>{account.email}</small></div></div><div className="page-body"><p className="section-caption">账户与配置</p><div className="setting-card"><span className="icon-tile purple"><Icon name="lock" /></span><div><b>加密模型配置</b><small>Harmony Responses · {account.model}</small></div><span className="configured"><Icon name="check" size={14} /> 已解锁</span></div><button className="setting-card" onClick={() => setSheet('device')}><span className="icon-tile gray"><Icon name="monitor" /></span><div><b>已连接设备</b><small>{devices.length ? `已绑定 ${devices.length} 台电脑` : "当前未连接电脑"}</small></div><Icon name="arrow" size={17} /></button><p className="section-caption spaced">小亨能力</p><button className="setting-card" onClick={() => setSheet('skills')}><span className="icon-tile purple"><Icon name="puzzle" /></span><div><b>技能管理</b><small>远程管理尚未接入</small></div><Icon name="arrow" size={17} /></button><button className="setting-card" onClick={() => setSheet('memory')}><span className="icon-tile green"><Icon name="memory" /></span><div><b>记忆</b><small>跨端记忆尚未接入</small></div><Icon name="arrow" size={17} /></button><button className="logout-button" onClick={() => void signOut()}>退出登录</button></div></div>}
   </main><nav className="bottom-nav" aria-label="主导航"><button className={view === 'home' ? 'active' : ''} onClick={() => setView('home')}><Icon name="home" />首页</button><button className={view === 'conversations' || view === 'chat' ? 'active' : ''} onClick={() => setView('conversations')}><Icon name="chat" />对话</button><button className={view === 'tasks' ? 'active' : ''} onClick={() => setView('tasks')}><Icon name="tasks" />任务</button><button className={view === 'mine' ? 'active' : ''} onClick={() => setView('mine')}><Icon name="user" />我的</button></nav>
-  {sheet && <div className="sheet-backdrop" onClick={event => { if (event.target === event.currentTarget) setSheet(null); }}><section className="feature-sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title"><div className="sheet-handle" /><button className="icon-button sheet-close" onClick={() => setSheet(null)} aria-label="关闭"><Icon name="close" size={19} /></button><span className="icon-tile purple"><Icon name={features[sheet].icon} size={23} /></span><h2 id="sheet-title">{features[sheet].title}</h2><p>{features[sheet].intro}</p>{sheet === 'device' ? <div className="pairing-panel"><p className="muted-note">{features.device.detail}</p><button className="secondary-button" onClick={() => void scanPairing()} disabled={pairingBusy}>扫描桌面二维码</button><label htmlFor="pairing-code">或粘贴桌面端复制的完整配对内容</label><textarea id="pairing-code" value={pairingText} onChange={event => setPairingText(event.target.value)} placeholder="harmonywork://pair?id=…&secret=…" rows={2} /><button className="primary-button" onClick={() => void claimPairing(pairingText)} disabled={pairingBusy || !pairingText.trim()}>{pairingBusy ? '正在绑定…' : '绑定电脑'}</button>{pairingError && <p className="form-error" role="alert">{pairingError}</p>}{devices.length > 0 && <div className="linked-devices"><b>已绑定设备</b>{devices.map(device => <div key={device.desktopDeviceId}><Icon name="monitor" size={17} /> {device.desktopName}</div>)}<label htmlFor="preferred-desktop">默认执行电脑</label><select id="preferred-desktop" value={selectedDesktopId} onChange={event => { setSelectedDesktopId(event.target.value); if (accountId.current) localStorage.setItem(preferredDesktopKey(accountId.current), event.target.value); }}>{devices.map(device => <option key={device.desktopDeviceId} value={device.desktopDeviceId}>{device.desktopName} · {device.desktopDeviceId.slice(0, 6)}</option>)}</select></div>}</div> : <><div className="availability"><b>接入状态</b><span>{features[sheet].detail}</span></div><button className="primary-button" onClick={() => setSheet(null)}>知道了</button></>}</section></div>}
+  {sheet && <div className="sheet-backdrop" onClick={event => { if (event.target === event.currentTarget) setSheet(null); }}><section className="feature-sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title"><div className="sheet-handle" /><button className="icon-button sheet-close" onClick={() => setSheet(null)} aria-label="关闭"><Icon name="close" size={19} /></button><span className="icon-tile purple"><Icon name={features[sheet].icon} size={23} /></span><h2 id="sheet-title">{features[sheet].title}</h2><p>{features[sheet].intro}</p>{sheet === 'device' ? <div className="pairing-panel"><p className="muted-note">{features.device.detail}</p><button className="secondary-button" onClick={() => void scanPairing()} disabled={pairingBusy}>扫描桌面二维码</button><label htmlFor="pairing-code">或粘贴桌面端复制的完整配对内容</label><textarea id="pairing-code" value={pairingText} onChange={event => setPairingText(event.target.value)} placeholder="harmonywork://pair?id=…&secret=…" rows={2} /><button className="primary-button" onClick={() => void claimPairing(pairingText)} disabled={pairingBusy || !pairingText.trim()}>{pairingBusy ? '正在绑定…' : '绑定电脑'}</button>{pairingError && <p className="form-error" role="alert">{pairingError}</p>}{devices.length > 0 && <div className="linked-devices"><b>已绑定设备</b>{devices.map(device => <div className="linked-device-row" key={device.desktopDeviceId}><span><Icon name="monitor" size={17} /> {device.desktopName}</span><button type="button" className="linked-device-remove" onClick={() => void unlinkDesktop(device)} disabled={unlinkingDesktopId === device.desktopDeviceId} aria-label={`解除与${device.desktopName}的绑定`}>{unlinkingDesktopId === device.desktopDeviceId ? "解除中…" : "解除绑定"}</button></div>)}<label htmlFor="preferred-desktop">默认执行电脑</label><select id="preferred-desktop" value={selectedDesktopId} onChange={event => { setSelectedDesktopId(event.target.value); if (accountId.current) localStorage.setItem(preferredDesktopKey(accountId.current), event.target.value); }}>{devices.map(device => <option key={device.desktopDeviceId} value={device.desktopDeviceId}>{device.desktopName} · {device.desktopDeviceId.slice(0, 6)}</option>)}</select></div>}</div> : <><div className="availability"><b>接入状态</b><span>{features[sheet].detail}</span></div><button className="primary-button" onClick={() => setSheet(null)}>知道了</button></>}</section></div>}
   </div>;
 }
 

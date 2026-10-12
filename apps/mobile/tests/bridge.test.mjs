@@ -51,3 +51,8 @@ test('a newly paired desktop becomes the default while an explicit selection sur
   assert.equal(selectPreferredDesktop(devices, '', 'old', false), 'old');
   assert.equal(selectPreferredDesktop(devices, 'missing', 'missing', false), 'new');
 });
+
+test('removing the preferred desktop selects a remaining device or no device', () => {
+  assert.equal(selectPreferredDesktop([{ desktopDeviceId: 'backup' }], 'removed', 'removed', false), 'backup');
+  assert.equal(selectPreferredDesktop([], 'removed', 'removed', false), '');
+});

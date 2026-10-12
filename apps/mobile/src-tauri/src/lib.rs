@@ -20,6 +20,7 @@ pub fn run() {
             chat::mobile_chat,
             chat::mobile_chat_continue,
             bridge::bridge_devices,
+            bridge::bridge_unlink,
             bridge::bridge_set_device,
             bridge::bridge_claim_pairing,
             bridge::bridge_sync_session,
