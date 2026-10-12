@@ -7,11 +7,17 @@ export type PendingTurn = {
   taskRequestKey?: string; contextMessages?: ChatMessage[]; finalText?: string;
   status: 'queued' | 'thinking' | 'working' | 'summarizing' | 'failed';
 };
-export type SyncState = { cursors: Record<string, number>; pendingTurns: PendingTurn[]; answeredTurns: string[] };
+export type SyncState = {
+  cursors: Record<string, number>;
+  taskEventCursors?: Record<string, number>;
+  changeCursor?: number;
+  pendingTurns: PendingTurn[];
+  answeredTurns: string[];
+};
 type StorageLike = Pick<Storage, 'getItem' | 'setItem'>;
 
 const prefix = 'harmony-work-mobile:sync:';
-const emptyState = (): SyncState => ({ cursors: {}, pendingTurns: [], answeredTurns: [] });
+const emptyState = (): SyncState => ({ cursors: {}, taskEventCursors: {}, changeCursor: 0, pendingTurns: [], answeredTurns: [] });
 
 export function mergeSharedMessages(session: ChatSession, messages: SharedMessage[], afterSeq: number): { session: ChatSession; afterSeq: number } {
   const ordered = [...messages].sort((a, b) => a.seq - b.seq);
@@ -41,6 +47,9 @@ export function loadSyncState(userId: string, storage: StorageLike = localStorag
     if (!parsed || typeof parsed !== 'object') return emptyState();
     return {
       cursors: parsed.cursors && typeof parsed.cursors === 'object' ? parsed.cursors : {},
+      taskEventCursors: parsed.taskEventCursors && typeof parsed.taskEventCursors === 'object' ? parsed.taskEventCursors : {},
+      changeCursor: typeof parsed.changeCursor === 'number' && Number.isSafeInteger(parsed.changeCursor) && parsed.changeCursor >= 0
+        ? parsed.changeCursor : 0,
       pendingTurns: Array.isArray(parsed.pendingTurns) ? parsed.pendingTurns.filter((turn: PendingTurn) =>
         typeof turn?.sessionId === 'string' && typeof turn?.turnId === 'string' && typeof turn?.userMessageId === 'string') : [],
       answeredTurns: Array.isArray(parsed.answeredTurns) ? parsed.answeredTurns.filter((id: unknown) => typeof id === 'string') : [],
@@ -51,6 +60,8 @@ export function loadSyncState(userId: string, storage: StorageLike = localStorag
 export function saveSyncState(userId: string, state: SyncState, storage: StorageLike = localStorage): void {
   try { storage.setItem(prefix + userId, JSON.stringify({
     cursors: state.cursors,
+    taskEventCursors: state.taskEventCursors ?? {},
+    changeCursor: state.changeCursor ?? 0,
     pendingTurns: state.pendingTurns.slice(-30),
     answeredTurns: state.answeredTurns.slice(-200),
   })); } catch { /* Keep the current conversation available. */ }

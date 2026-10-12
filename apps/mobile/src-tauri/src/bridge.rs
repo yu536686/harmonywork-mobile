@@ -4,11 +4,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::time::Duration;
 use std::sync::{Mutex, OnceLock};
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 use uuid::Uuid;
 
 const BRIDGE_ORIGIN: &str = "https://remote.harmonywatch.cn";
 static DEVICE_AUTH: OnceLock<Mutex<Option<(String, String)>>> = OnceLock::new();
+static CHANGE_STREAM: OnceLock<Mutex<Option<tauri::async_runtime::JoinHandle<()>>>> = OnceLock::new();
 
 #[tauri::command]
 pub fn bridge_set_device(device_id: String, device_token: String) -> Result<(), String> {
@@ -206,6 +207,73 @@ pub async fn bridge_append_message(
 pub async fn bridge_messages(state: State<'_, AppState>, session_id: String, after_seq: u64) -> Result<Value, String> {
     let id = pairing_id(&session_id)?;
     request(&state, Method::GET, &format!("/api/mobile/sessions/{id}/messages?afterSeq={after_seq}"), None).await
+}
+
+#[tauri::command]
+pub async fn bridge_task_events(state: State<'_, AppState>, session_id: String, after_seq: u64) -> Result<Value, String> {
+    let id = pairing_id(&session_id)?;
+    request(&state, Method::GET, &format!("/api/mobile/sessions/{id}/task-events?afterSeq={after_seq}"), None).await
+}
+
+#[tauri::command]
+pub async fn bridge_changes(state: State<'_, AppState>, after_seq: u64) -> Result<Value, String> {
+    request(&state, Method::GET, &format!("/api/mobile/changes?afterSeq={after_seq}"), None).await
+}
+
+#[tauri::command]
+pub fn bridge_start_change_stream(app: AppHandle, state: State<'_, AppState>, after_seq: u64) -> Result<(), String> {
+    let cookie = current_cookie(&state)?;
+    let (device_id, token) = DEVICE_AUTH.get_or_init(|| Mutex::new(None))
+        .lock().map_err(|_| "设备状态不可用".to_string())?
+        .clone().ok_or_else(|| "请先绑定电脑".to_string())?;
+    let mut active = CHANGE_STREAM.get_or_init(|| Mutex::new(None))
+        .lock().map_err(|_| "变更连接状态不可用".to_string())?;
+    if let Some(handle) = active.take() { handle.abort(); }
+    *active = Some(tauri::async_runtime::spawn(async move {
+        loop {
+            let client = match reqwest::Client::builder().connect_timeout(Duration::from_secs(10)).build() {
+                Ok(client) => client,
+                Err(_) => break,
+            };
+            let response = client.get(bridge_url(&format!("/api/mobile/changes/stream?afterSeq={after_seq}")))
+                .header(COOKIE, &cookie)
+                .header("X-Harmony-Device-Id", &device_id)
+                .header("X-Harmony-Device-Kind", "mobile")
+                .header("X-Harmony-Device-Token", &token)
+                .send().await;
+            if let Ok(mut response) = response {
+                if response.status().as_u16() == 401 || response.status().as_u16() == 403 { break; }
+                if response.status().is_success() {
+                    let mut buffer = Vec::<u8>::new();
+                    while let Ok(Some(chunk)) = response.chunk().await {
+                        buffer.extend_from_slice(&chunk);
+                        while let Some(end) = buffer.windows(2).position(|window| window == b"\n\n") {
+                            let frame: Vec<u8> = buffer.drain(..end + 2).collect();
+                            if let Ok(text) = std::str::from_utf8(&frame) {
+                                if let Some(data) = text.lines().find_map(|line| line.strip_prefix("data: ")) {
+                                    if let Ok(value) = serde_json::from_str::<Value>(data) {
+                                        if let Some(seq) = value["latestSeq"].as_u64() {
+                                            let _ = app.emit("mobile_bridge_change_hint", seq);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if buffer.len() > 8_192 { buffer.clear(); }
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+    }));
+    Ok(())
+}
+
+#[tauri::command]
+pub fn bridge_stop_change_stream() {
+    if let Ok(mut active) = CHANGE_STREAM.get_or_init(|| Mutex::new(None)).lock() {
+        if let Some(handle) = active.take() { handle.abort(); }
+    }
 }
 
 #[tauri::command]
