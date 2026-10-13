@@ -30,17 +30,17 @@
 
 ## 任务 1：元数据与授权票据
 
-- [ ] 在服务端集成测试加失败用例：目标桌面只能给自己已领取的任务登记最多 200 MiB 的文件元数据；另一账户、未绑定手机或其他桌面不能列出、出票、核验。票据重复核验、过期、解绑后为 403/410。
-- [ ] schema 新增 workbuddy_mobile_attachments（UUID、user/session/task/desktop、name、MIME、size、sha256、created_at、revoked_at）及 workbuddy_mobile_transfer_tickets（token_hash、attachment_id、mobile_id、expires_at、consumed_at）；不要添加路径或 BLOB 字段。
-- [ ] 增加 POST /tasks/:id/attachments、GET /sessions/:id/attachments、POST /attachments/:id/ticket、POST /attachments/:id/verify。ticket 由 CSPRNG 生成，仅将原文返回手机，服务端存哈希；有效期 60 秒且只能核验一次。verify 必须以桌面设备令牌和有效 link 认证，并要求 ticket 指定的 mobileId 与目标手机匹配。
-- [ ] 附件登记后在同一任务写 artifact_ready 事件与 changes 通知；解绑、任务取消及本地文件失效时标记附件 revoked。运行 npm run test:server、npm run build:server，提交服务端。
+- [x] 在服务端集成测试加失败用例：目标桌面只能给自己已领取的任务登记最多 200 MiB 的文件元数据；另一账户、未绑定手机或其他桌面不能列出、出票、核验。票据重复核验、过期、解绑后为 403/410。
+- [x] schema 新增 workbuddy_mobile_attachments（UUID、user/session/task/desktop、name、MIME、size、sha256、created_at、revoked_at）及 workbuddy_mobile_transfer_tickets（token_hash、attachment_id、mobile_id、expires_at、consumed_at）；不要添加路径或 BLOB 字段。
+- [x] 增加 POST /tasks/:id/attachments、GET /sessions/:id/attachments、POST /attachments/:id/ticket、POST /attachments/:id/verify。ticket 由 CSPRNG 生成，仅将原文返回手机，服务端存哈希；有效期 60 秒且只能核验一次。verify 必须以桌面设备令牌和有效 link 认证，并要求 ticket 指定的 mobileId 与目标手机匹配。
+- [x] 附件登记后在同一任务写 artifact_ready 事件与 changes 通知；解绑、任务取消及本地文件失效时标记附件 revoked。运行 npm run test:server、npm run build:server，提交服务端。
 
 ## 任务 2：Windows Agent 分享工具与本机文件映射
 
-- [ ] WorkBuddy MCP Host 的测试先验证：普通桌面会话看不到 share_file；手机任务模式下工具只接受 path、displayName；模型输入中的 taskId/sessionId 被拒绝。
-- [ ] mobile_share.rs 定义工具描述与调用，读取本次 Codex 子进程继承的 WORKBUDDY_MOBILE_TASK_CAPABILITY。桌面 worker 启动执行前生成随机能力令牌，并在仅当前用户可读的 app_data_dir/mobile_share_requests 下建立任务上下文；MCP Host 通过该能力令牌提交请求，桌面 worker 核对后补上 taskId、sessionId、desktopId，返回附件 ID。令牌只活到该任务结束，不写入聊天、日志或服务端。
-- [ ] Windows mobile_attachment.rs 规范化真实路径，拒绝符号链接跳出允许工作区、目录、设备文件和大于 200 MiB 文件；工作区外仅遵循现有桌面文件授权结果。计算 size、SHA-256、MIME；本地私有映射保存附件 ID 与真实路径，服务端只提交展示元数据。文件后续读取前重新 stat 并验证摘要，修改或删除即撤销。
-- [ ] 把附件 ID 加入对应任务成果事件，并在 MobileTaskCard 中展示文件名、大小、类型。运行 WorkBuddy MCP Host 测试、Windows cargo test、npm run build:web；提交 Windows 文件登记。
+- [x] WorkBuddy MCP Host 的测试先验证：普通桌面会话看不到 share_file；手机任务模式下工具只接受 path、displayName；模型输入中的 taskId/sessionId 被拒绝。
+- [x] mobile_share.rs 定义工具描述与调用，读取本次 Codex 子进程继承的 WORKBUDDY_MOBILE_TASK_CAPABILITY。桌面 worker 启动执行前生成随机能力令牌，并在仅当前用户可读的 app_data_dir/mobile_share_requests 下建立任务上下文；MCP Host 通过该能力令牌提交请求，桌面 worker 核对后补上 taskId、sessionId、desktopId，返回附件 ID。令牌只活到该任务结束，不写入聊天、日志或服务端。
+- [x] Windows mobile_attachment.rs 规范化真实路径，拒绝符号链接跳出允许工作区、目录、设备文件和大于 200 MiB 文件；工作区外仅遵循现有桌面文件授权结果。计算 size、SHA-256、MIME；本地私有映射保存附件 ID 与真实路径，服务端只提交展示元数据。文件后续读取前重新 stat 并验证摘要，修改或删除即撤销。
+- [x] 把附件 ID 加入对应任务成果事件，并在 MobileTaskCard 中展示文件名、大小、类型。运行 WorkBuddy MCP Host 测试、Windows cargo test、npm run build:web；提交 Windows 文件登记。
 
 ## 任务 3：P2P 传输协议
 

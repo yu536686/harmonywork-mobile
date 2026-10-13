@@ -103,6 +103,18 @@ pub async fn bridge_devices(state: State<'_, AppState>) -> Result<Value, String>
 }
 
 #[tauri::command]
+pub async fn bridge_attachments(state: State<'_, AppState>, session_id: String) -> Result<Value, String> {
+    let id = pairing_id(&session_id)?;
+    request(&state, Method::GET, &format!("/api/mobile/sessions/{id}/attachments"), None).await
+}
+
+#[tauri::command]
+pub async fn bridge_attachment_ticket(state: State<'_, AppState>, attachment_id: String) -> Result<Value, String> {
+    let id = pairing_id(&attachment_id)?;
+    request(&state, Method::POST, &format!("/api/mobile/attachments/{id}/ticket"), Some(json!({}))).await
+}
+
+#[tauri::command]
 pub async fn bridge_unlink(
     state: State<'_, AppState>, desktop_device_id: String, mobile_device_id: String,
 ) -> Result<Value, String> {

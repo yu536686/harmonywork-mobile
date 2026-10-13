@@ -1,5 +1,6 @@
 mod account;
 mod bridge;
+mod mobile_attachment;
 mod chat;
 mod vault;
 
@@ -20,6 +21,8 @@ pub fn run() {
             chat::mobile_chat,
             chat::mobile_chat_continue,
             bridge::bridge_devices,
+            bridge::bridge_attachments,
+            bridge::bridge_attachment_ticket,
             bridge::bridge_unlink,
             bridge::bridge_set_device,
             bridge::bridge_claim_pairing,
@@ -41,6 +44,13 @@ pub fn run() {
             bridge::bridge_create_task,
             bridge::bridge_signals,
             bridge::bridge_send_signal,
+            mobile_attachment::mobile_attachment_receive_start,
+            mobile_attachment::mobile_attachment_receive_chunk,
+            mobile_attachment::mobile_attachment_receive_finish,
+            mobile_attachment::mobile_attachment_receive_abort,
+            mobile_attachment::mobile_attachment_preview,
+            mobile_attachment::mobile_attachment_save,
+            mobile_attachment::mobile_attachment_clear,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

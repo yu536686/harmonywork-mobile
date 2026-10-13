@@ -4,6 +4,7 @@ import { listen } from '@tauri-apps/api/event';
 import { Icon, type IconName } from './Icon.tsx';
 import { parsePairingCode, selectPreferredDesktop, type LinkedDevice, type RemoteTask } from './bridge.ts';
 import { BridgePeer, type BridgeSignal } from './bridgePeer.ts';
+import { DirectFileReceiver, type SharedAttachment } from './directFileReceiver.ts';
 import { TaskEventCard } from './TaskEventCard.tsx';
 import { mergeTaskEvents, type TaskEvent } from './taskEvents.ts';
 import { loadSyncState, markTurnAnswered, mergeSharedMessages, restartPendingTurn, saveSyncState, upsertPendingTurn, type PendingTurn, type SharedMessage, type SyncState } from './conversationSync.ts';
@@ -54,6 +55,9 @@ function App() {
   const [selectedDesktopId, setSelectedDesktopId] = useState('');
   const [peerState, setPeerState] = useState<'connecting' | 'direct' | 'fallback'>('fallback');
   const peerRef = useRef<BridgePeer | null>(null);
+  const receiverRef = useRef<DirectFileReceiver | null>(null);
+  const [attachmentsBySession, setAttachmentsBySession] = useState<Record<string, SharedAttachment[]>>({});
+  const [attachmentTransfers, setAttachmentTransfers] = useState<Record<string, { status: 'downloading' | 'ready' | 'error'; received: number; error?: string }>>({});
   const syncState = useRef<SyncState>({ cursors: {}, pendingTurns: [], answeredTurns: [] });
   const processingTurns = useRef(new Set<string>());
   const queuingTasks = useRef(new Set<string>());
@@ -116,6 +120,7 @@ function App() {
     const refresh = () => {
       void refreshTaskEvents(activeId);
       void refreshActiveMessages(activeId);
+      void refreshAttachments(activeId);
     };
     refresh();
     const timer = window.setInterval(refresh, 3_000);
@@ -155,17 +160,33 @@ function App() {
   useEffect(() => {
     const device = devices.find(item => item.desktopDeviceId === selectedDesktopId);
     if (!account || !device || typeof RTCPeerConnection === 'undefined') return;
+    let receiver: DirectFileReceiver;
     const peer = new BridgePeer({
       desktopDeviceId: device.desktopDeviceId, mobileDeviceId: device.mobileDeviceId,
       localDeviceId: device.mobileDeviceId, remoteDeviceId: device.desktopDeviceId, initiator: true,
       sendSignal: (kind, payload) => invoke('bridge_send_signal', { desktopDeviceId: device.desktopDeviceId, mobileDeviceId: device.mobileDeviceId, senderDeviceId: device.mobileDeviceId, recipientDeviceId: device.desktopDeviceId, kind, payload }),
       pollSignals: after => invoke<{ signals: BridgeSignal[] }>('bridge_signals', { deviceId: device.mobileDeviceId, after }).then(result => result.signals),
       onHint: () => { void refreshTasks(); },
-      onState: setPeerState,
+      onState: state => { setPeerState(state); if (state === 'fallback') void receiver.disconnected(); },
+      onFileFrame: frame => { void receiver.onFrame(frame); },
     });
+    receiver = new DirectFileReceiver(
+      frame => peer.sendFileFrame(frame),
+      attachment => invoke<number>('mobile_attachment_receive_start', {
+        attachmentId: attachment.id, name: attachment.name, mimeType: attachment.mimeType,
+        size: attachment.size, sha256: attachment.sha256,
+      }),
+      (attachmentId, offset, bytes) => invoke<number>('mobile_attachment_receive_chunk', { attachmentId, offset, bytes }),
+      attachmentId => invoke('mobile_attachment_receive_finish', { attachmentId }),
+      attachmentId => invoke('mobile_attachment_receive_abort', { attachmentId }),
+      attachmentId => setAttachmentTransfers(current => ({ ...current, [attachmentId]: { status: 'ready', received: current[attachmentId]?.received ?? 0 } })),
+      (attachmentId, message) => setAttachmentTransfers(current => ({ ...current, [attachmentId]: { status: 'error', received: 0, error: message } })),
+      (attachmentId, received) => setAttachmentTransfers(current => ({ ...current, [attachmentId]: { status: 'downloading', received } })),
+    );
     peerRef.current = peer;
+    receiverRef.current = receiver;
     void peer.start().catch(() => setPeerState('fallback'));
-    return () => { peer.stop(); peerRef.current = null; };
+    return () => { void receiver.cancel(); peer.stop(); peerRef.current = null; receiverRef.current = null; };
   }, [account?.id, selectedDesktopId, devices]);
   useEffect(() => {
     if (view === 'chat') chatEnd.current?.scrollIntoView({
@@ -196,6 +217,8 @@ function App() {
   }
 
   async function signOut() {
+    await receiverRef.current?.cancel();
+    await invoke('mobile_attachment_clear').catch(() => undefined);
     await invoke('bridge_stop_change_stream').catch(() => undefined);
     await invoke('mobile_logout').catch(() => undefined);
     await invoke('bridge_set_device', { deviceId: '', deviceToken: '' }).catch(() => undefined);
@@ -210,6 +233,8 @@ function App() {
     setMobileDeviceId('');
     setTasks([]);
     setTaskEvents({});
+    setAttachmentsBySession({});
+    setAttachmentTransfers({});
     taskEventsRef.current = {};
     setSheet(null);
     setPairingText('');
@@ -321,6 +346,60 @@ function App() {
       }
     } catch { /* Keep the last known task progress until the coordinator returns. */ }
     finally { syncingTaskEvents.current.delete(sessionId); }
+  }
+
+  async function refreshAttachments(sessionId: string) {
+    const owner = accountId.current;
+    if (!owner || !mobileDeviceId) return;
+    try {
+      const result = await invoke<{ attachments: SharedAttachment[] }>('bridge_attachments', { sessionId });
+      if (owner !== accountId.current) return;
+      setAttachmentsBySession(current => ({ ...current, [sessionId]: result.attachments }));
+    } catch { /* Existing cards remain readable while the coordinator is offline. */ }
+  }
+
+  async function downloadAttachment(attachment: SharedAttachment) {
+    const receiver = receiverRef.current;
+    const peer = peerRef.current;
+    if (!receiver || !peer || attachment.desktopDeviceId !== selectedDesktopId) {
+      setAttachmentTransfers(current => ({ ...current, [attachment.id]: {
+        status: 'error', received: 0, error: attachment.desktopDeviceId !== selectedDesktopId
+          ? '请在设备管理中选择发送此文件的电脑' : '电脑直连不可用，请重试',
+      } }));
+      return;
+    }
+    const previousId = receiver.activeAttachmentId;
+    if (previousId && previousId !== attachment.id) {
+      setAttachmentTransfers(current => ({ ...current, [previousId]: {
+        status: 'error', received: 0, error: '已取消，开始下载另一个附件',
+      } }));
+    }
+    setAttachmentTransfers(current => ({ ...current, [attachment.id]: { status: 'downloading', received: 0 } }));
+    try {
+      if (!peer.fileReady) {
+        await peer.reconnect();
+        for (let attempt = 0; attempt < 24 && !peer.fileReady; attempt++) {
+          await new Promise(resolve => window.setTimeout(resolve, 500));
+        }
+        if (!peer.fileReady) throw new Error('电脑直连不可用，请重试');
+      }
+      const response = await invoke<{ ticket: string }>('bridge_attachment_ticket', { attachmentId: attachment.id });
+      await receiver.begin(attachment, response.ticket);
+    } catch (error) {
+      setAttachmentTransfers(current => ({ ...current, [attachment.id]: {
+        status: 'error', received: 0, error: errorText(error),
+      } }));
+    }
+  }
+
+  async function useCachedAttachment(attachmentId: string, action: 'preview' | 'save') {
+    try {
+      await invoke(action === 'preview' ? 'mobile_attachment_preview' : 'mobile_attachment_save', { attachmentId });
+    } catch (error) {
+      setAttachmentTransfers(current => ({ ...current, [attachmentId]: {
+        status: 'error', received: 0, error: errorText(error),
+      } }));
+    }
   }
 
   async function refreshActiveMessages(sessionId: string) {
@@ -670,12 +749,38 @@ function App() {
       .map(event => event.taskId))]
       .map(taskId => <TaskEventCard key={taskId} taskId={taskId} events={events}
         task={tasks.find(task => task.id === taskId)} />);
+    const attachmentCards = (attachmentsBySession[session.id] ?? []).map(attachment => {
+      const transfer = attachmentTransfers[attachment.id];
+      const previewable = attachment.mimeType.startsWith('image/') || attachment.mimeType === 'application/pdf' ||
+        attachment.mimeType.startsWith('text/') || attachment.mimeType === 'application/json';
+      const size = attachment.size >= 1024 * 1024
+        ? `${(attachment.size / 1024 / 1024).toFixed(1)} MiB` : `${Math.ceil(attachment.size / 1024)} KiB`;
+      return <section className="mobile-attachment-card" key={attachment.id} aria-label={`电脑附件 ${attachment.name}`}>
+        <span className="mobile-attachment-icon"><Icon name="document" size={20} /></span>
+        <div className="mobile-attachment-body"><strong>{attachment.name}</strong>
+          <small>{size} · {attachment.mimeType}</small>
+          <p>{transfer?.status === 'downloading'
+            ? `正在直连获取 · ${Math.round(100 * transfer.received / Math.max(attachment.size, 1))}%`
+            : transfer?.status === 'ready' ? '已完成 SHA-256 校验，可预览或保存'
+            : transfer?.status === 'error' ? transfer.error
+            : '仅电脑在线且直连可用时可获取'}</p>
+          <div className="mobile-attachment-actions">
+            {transfer?.status !== 'ready' && <button type="button" disabled={transfer?.status === 'downloading'}
+              onClick={() => void downloadAttachment(attachment)}>{transfer?.status === 'downloading' ? '传输中…' : '获取附件'}</button>}
+            {transfer?.status === 'ready' && <>
+              {previewable && <button type="button" onClick={() => void useCachedAttachment(attachment.id, 'preview')}>预览</button>}
+              <button type="button" onClick={() => void useCachedAttachment(attachment.id, 'save')}>保存到手机</button>
+            </>}
+          </div>
+        </div>
+      </section>;
+    });
     return <>{session.messages.map(message => <Fragment key={message.id}>
       {message.role === 'user'
         ? <div className="message user-message">{message.content}</div>
         : <div className="agent-message"><div className="agent-label"><Icon name="spark" size={14} /> 小亨</div><div className="message assistant-message">{message.content}</div></div>}
       {message.role === 'user' && cardsAfter(message.id)}
-    </Fragment>)}{orphanCards}</>;
+    </Fragment>)}{orphanCards}{attachmentCards}</>;
   }
 
   if (booting) return <div className="launch"><span className="brand-mark">H</span><b>Harmony Work</b></div>;
