@@ -6,7 +6,7 @@ use tauri::State;
 use zeroize::Zeroize;
 
 const RESPONSES_URL: &str = "https://api.harmonywatch.cn/v1/responses";
-const MOBILE_INSTRUCTIONS: &str = "你是 Harmony Work 手机端的小亨。用中文清楚、简洁地帮助用户完成对话。若提供 execute_on_desktop 工具且用户需求需要访问电脑文件、软件或较复杂的本地执行，可调用一次，goal 要具体、可执行。不要声称尚未完成的工作已经完成。电脑结果返回后由你在当前会话给出最终答复。";
+const MOBILE_INSTRUCTIONS: &str = "你是 Harmony Work 手机端的小亨。用中文清楚、简洁地帮助用户完成对话。若提供 execute_on_desktop 工具且用户需求需要访问电脑文件、软件或较复杂的本地执行，可调用一次。用户要求把电脑文件发到手机会话时，必须委派电脑完成附件发送；不要声称没有此能力。goal 要具体、可执行，并保留用户原话中的交付方式。不要声称尚未完成的工作已经完成。电脑结果返回后由你在当前会话给出最终答复。";
 const DESKTOP_TOOL: &str = "execute_on_desktop";
 
 #[derive(Serialize)]
@@ -133,6 +133,18 @@ fn message_input(messages: Vec<ChatMessage>) -> Vec<Value> {
     messages.into_iter().map(|message| json!({"role":message.role,"content":message.content})).collect()
 }
 
+fn build_mobile_request(model: &str, messages: Vec<ChatMessage>, desktop_available: bool) -> Value {
+    let mut body = json!({"model": model, "instructions": MOBILE_INSTRUCTIONS,
+        "input": message_input(messages), "store": false, "max_output_tokens": 1200,
+        "include": ["reasoning.encrypted_content"]});
+    if desktop_available {
+        body["tools"] = json!([{"type":"function","name":DESKTOP_TOOL,
+            "description":"让已绑定的 Windows 电脑完成本地文件、软件或复杂工作，包括把电脑文件作为附件发送到当前手机会话。goal 必须保留用户要求的交付方式。",
+            "parameters":{"type":"object","properties":{"goal":{"type":"string","description":"明确的电脑执行目标"}},"required":["goal"],"additionalProperties":false},"strict":true}]);
+    }
+    body
+}
+
 #[tauri::command]
 pub async fn mobile_chat(
     state: State<'_, AppState>,
@@ -141,14 +153,7 @@ pub async fn mobile_chat(
 ) -> Result<ChatDecision, String> {
     validate_messages(&messages)?;
     let (model, api_key) = model_credentials(&state)?;
-    let mut body = json!({"model": model, "instructions": MOBILE_INSTRUCTIONS,
-        "input": message_input(messages), "store": false, "max_output_tokens": 1200,
-        "include": ["reasoning.encrypted_content"]});
-    if desktop_available {
-        body["tools"] = json!([{"type":"function","name":DESKTOP_TOOL,
-            "description":"在已绑定的 Windows 电脑上完成需要本地文件、软件或复杂执行的工作，并返回执行结果。",
-            "parameters":{"type":"object","properties":{"goal":{"type":"string","description":"明确的电脑执行目标"}},"required":["goal"],"additionalProperties":false},"strict":true}]);
-    }
+    let body = build_mobile_request(&model, messages, desktop_available);
     let value = send_response(api_key, body).await?;
     parse_chat_decision(&value, desktop_available)
 }
@@ -180,7 +185,7 @@ pub async fn mobile_chat_continue(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_chat_decision, validate_messages, visible_text, ChatDecision, ChatMessage};
+    use super::{build_mobile_request, parse_chat_decision, validate_messages, visible_text, ChatDecision, ChatMessage};
     use serde_json::json;
 
     #[test]
@@ -245,4 +250,5 @@ mod tests {
         let response = json!({"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"已完成"}]}]});
         assert!(matches!(parse_chat_decision(&response, true), Ok(ChatDecision::Text { text }) if text == "已完成"));
     }
+
 }

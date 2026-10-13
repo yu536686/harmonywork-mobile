@@ -44,6 +44,7 @@ pub fn run() {
             bridge::bridge_create_task,
             bridge::bridge_signals,
             bridge::bridge_send_signal,
+            bridge::bridge_attachment_relay_download,
             mobile_attachment::mobile_attachment_receive_start,
             mobile_attachment::mobile_attachment_receive_chunk,
             mobile_attachment::mobile_attachment_receive_finish,

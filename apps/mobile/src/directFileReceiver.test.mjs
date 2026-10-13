@@ -62,4 +62,17 @@ test('receiver requests a new ticket from a preserved partial offset', async () 
   await receiver.disconnected();
   await receiver.begin(attachment, 'b'.repeat(43));
   assert.deepEqual(sent.at(-1), { type: 'request', attachmentId: attachment.id, ticket: 'b'.repeat(43), offset: 2 });
+  await receiver.cancel();
+});
+
+test('receiver falls back when a direct channel stays open without sending data', async () => {
+  const errors = [];
+  const receiver = new DirectFileReceiver(() => true,
+    async () => 0, async () => 0, async () => undefined,
+    async () => undefined, () => undefined,
+    (_id, message) => errors.push(message), () => undefined, 20);
+  await receiver.begin(attachment, ticket);
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(receiver.activeAttachmentId, null);
+  assert.match(errors[0], /服务器中转/);
 });

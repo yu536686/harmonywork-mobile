@@ -9,6 +9,7 @@ export type SharedAttachment = {
 export class DirectFileReceiver {
   private active: { attachment: SharedAttachment; offset: number } | null = null;
   private chain: Promise<void> = Promise.resolve();
+  private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private send: (frame: FileFrame) => boolean;
   private startNative: (attachment: SharedAttachment) => Promise<number>;
   private appendNative: (id: string, offset: number, bytes: string) => Promise<number>;
@@ -17,6 +18,7 @@ export class DirectFileReceiver {
   private onReady: (id: string) => void;
   private onError: (id: string, message: string) => void;
   private onProgress: (id: string, received: number, total: number) => void;
+  private idleTimeoutMs: number;
 
   constructor(
     send: (frame: FileFrame) => boolean,
@@ -27,6 +29,7 @@ export class DirectFileReceiver {
     onReady: (id: string) => void,
     onError: (id: string, message: string) => void,
     onProgress: (id: string, received: number, total: number) => void = () => undefined,
+    idleTimeoutMs = 8_000,
   ) {
     this.send = send;
     this.startNative = startNative;
@@ -36,6 +39,20 @@ export class DirectFileReceiver {
     this.onReady = onReady;
     this.onError = onError;
     this.onProgress = onProgress;
+    this.idleTimeoutMs = idleTimeoutMs;
+  }
+
+  private armIdleTimer(id: string): void {
+    if (this.idleTimer) clearTimeout(this.idleTimer);
+    this.idleTimer = setTimeout(() => {
+      this.idleTimer = null;
+      if (this.active?.attachment.id === id) void this.fail(id, '电脑直连超时，正在尝试服务器中转');
+    }, this.idleTimeoutMs);
+  }
+
+  private clearIdleTimer(): void {
+    if (this.idleTimer) clearTimeout(this.idleTimer);
+    this.idleTimer = null;
   }
 
   get activeAttachmentId(): string | null { return this.active?.attachment.id ?? null; }
@@ -53,6 +70,7 @@ export class DirectFileReceiver {
       this.onError(attachment.id, '电脑直连不可用，可重试续传');
       throw new Error('电脑直连不可用，请重试');
     }
+    this.armIdleTimer(attachment.id);
   }
 
   onFrame(raw: FileFrame): Promise<void> {
@@ -64,6 +82,7 @@ export class DirectFileReceiver {
   }
 
   async cancel(): Promise<void> {
+    this.clearIdleTimer();
     const id = this.active?.attachment.id;
     this.active = null;
     if (id) {
@@ -73,6 +92,7 @@ export class DirectFileReceiver {
   }
 
   private async pause(): Promise<void> {
+    this.clearIdleTimer();
     const id = this.active?.attachment.id;
     this.active = null;
     if (id) this.send({ type: 'cancel', attachmentId: id });
@@ -108,6 +128,7 @@ export class DirectFileReceiver {
       const written = await this.appendNative(frame.attachmentId, frame.offset, frame.bytes);
       if (written !== next) throw new Error('Cache offset mismatch');
       current.offset = next;
+      this.armIdleTimer(frame.attachmentId);
       this.onProgress(frame.attachmentId, next, current.attachment.size);
       if (!this.send({ type: 'ack', attachmentId: frame.attachmentId, offset: next })) {
         throw new Error('Direct connection lost');
@@ -120,6 +141,7 @@ export class DirectFileReceiver {
         throw new Error('File completion mismatch');
       }
       await this.finishNative(frame.attachmentId);
+      this.clearIdleTimer();
       this.active = null;
       this.onReady(frame.attachmentId);
     }

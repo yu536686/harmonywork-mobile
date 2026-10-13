@@ -5,6 +5,7 @@ import { Icon, type IconName } from './Icon.tsx';
 import { parsePairingCode, selectPreferredDesktop, type LinkedDevice, type RemoteTask } from './bridge.ts';
 import { BridgePeer, type BridgeSignal } from './bridgePeer.ts';
 import { DirectFileReceiver, type SharedAttachment } from './directFileReceiver.ts';
+import { desktopTaskPrompt } from './desktopTaskPrompt.ts';
 import { TaskEventCard } from './TaskEventCard.tsx';
 import { mergeTaskEvents, type TaskEvent } from './taskEvents.ts';
 import { loadSyncState, markTurnAnswered, mergeSharedMessages, restartPendingTurn, saveSyncState, upsertPendingTurn, type PendingTurn, type SharedMessage, type SyncState } from './conversationSync.ts';
@@ -55,6 +56,8 @@ function App() {
   const [selectedDesktopId, setSelectedDesktopId] = useState('');
   const [peerState, setPeerState] = useState<'connecting' | 'direct' | 'fallback'>('fallback');
   const peerRef = useRef<BridgePeer | null>(null);
+  const directAttachmentRef = useRef<SharedAttachment | null>(null);
+  const relayTransfers = useRef(new Set<string>());
   const receiverRef = useRef<DirectFileReceiver | null>(null);
   const [attachmentsBySession, setAttachmentsBySession] = useState<Record<string, SharedAttachment[]>>({});
   const [attachmentTransfers, setAttachmentTransfers] = useState<Record<string, { status: 'downloading' | 'ready' | 'error'; received: number; error?: string }>>({});
@@ -179,8 +182,13 @@ function App() {
       (attachmentId, offset, bytes) => invoke<number>('mobile_attachment_receive_chunk', { attachmentId, offset, bytes }),
       attachmentId => invoke('mobile_attachment_receive_finish', { attachmentId }),
       attachmentId => invoke('mobile_attachment_receive_abort', { attachmentId }),
-      attachmentId => setAttachmentTransfers(current => ({ ...current, [attachmentId]: { status: 'ready', received: current[attachmentId]?.received ?? 0 } })),
-      (attachmentId, message) => setAttachmentTransfers(current => ({ ...current, [attachmentId]: { status: 'error', received: 0, error: message } })),
+      attachmentId => { directAttachmentRef.current = null; setAttachmentTransfers(current => ({ ...current, [attachmentId]: { status: 'ready', received: current[attachmentId]?.received ?? 0 } })); },
+      (attachmentId, message) => {
+        const pending = directAttachmentRef.current;
+        directAttachmentRef.current = null;
+        if (pending?.id === attachmentId) void downloadRelayAttachment(pending);
+        else setAttachmentTransfers(current => ({ ...current, [attachmentId]: { status: 'error', received: 0, error: message } }));
+      },
       (attachmentId, received) => setAttachmentTransfers(current => ({ ...current, [attachmentId]: { status: 'downloading', received } })),
     );
     peerRef.current = peer;
@@ -188,6 +196,17 @@ function App() {
     void peer.start().catch(() => setPeerState('fallback'));
     return () => { void receiver.cancel(); peer.stop(); peerRef.current = null; receiverRef.current = null; };
   }, [account?.id, selectedDesktopId, devices]);
+  useEffect(() => {
+    let stopped = false;
+    let unlisten: (() => void) | undefined;
+    void listen<{ attachmentId: string; received: number }>('mobile_attachment_relay_progress', event => {
+      const { attachmentId, received } = event.payload;
+      setAttachmentTransfers(current => ({ ...current,
+        [attachmentId]: { status: 'downloading', received },
+      }));
+    }).then(stop => { if (stopped) stop(); else unlisten = stop; });
+    return () => { stopped = true; unlisten?.(); };
+  }, []);
   useEffect(() => {
     if (view === 'chat') chatEnd.current?.scrollIntoView({
       behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
@@ -358,17 +377,25 @@ function App() {
     } catch { /* Existing cards remain readable while the coordinator is offline. */ }
   }
 
+  async function downloadRelayAttachment(attachment: SharedAttachment) {
+    if (relayTransfers.current.has(attachment.id)) return;
+    relayTransfers.current.add(attachment.id);
+    setAttachmentTransfers(current => ({ ...current, [attachment.id]: { status: 'downloading', received: current[attachment.id]?.received ?? 0 } }));
+    try {
+      await invoke('bridge_attachment_relay_download', {
+        attachmentId: attachment.id, name: attachment.name, mimeType: attachment.mimeType,
+        size: attachment.size, sha256: attachment.sha256,
+      });
+      setAttachmentTransfers(current => ({ ...current, [attachment.id]: { status: 'ready', received: attachment.size } }));
+    } catch (error) {
+      setAttachmentTransfers(current => ({ ...current, [attachment.id]: { status: 'error', received: 0, error: errorText(error) } }));
+    } finally { relayTransfers.current.delete(attachment.id); }
+  }
+
   async function downloadAttachment(attachment: SharedAttachment) {
     const receiver = receiverRef.current;
     const peer = peerRef.current;
-    if (!receiver || !peer || attachment.desktopDeviceId !== selectedDesktopId) {
-      setAttachmentTransfers(current => ({ ...current, [attachment.id]: {
-        status: 'error', received: 0, error: attachment.desktopDeviceId !== selectedDesktopId
-          ? '请在设备管理中选择发送此文件的电脑' : '电脑直连不可用，请重试',
-      } }));
-      return;
-    }
-    const previousId = receiver.activeAttachmentId;
+    const previousId = receiver?.activeAttachmentId;
     if (previousId && previousId !== attachment.id) {
       setAttachmentTransfers(current => ({ ...current, [previousId]: {
         status: 'error', received: 0, error: '已取消，开始下载另一个附件',
@@ -376,19 +403,14 @@ function App() {
     }
     setAttachmentTransfers(current => ({ ...current, [attachment.id]: { status: 'downloading', received: 0 } }));
     try {
-      if (!peer.fileReady) {
-        await peer.reconnect();
-        for (let attempt = 0; attempt < 24 && !peer.fileReady; attempt++) {
-          await new Promise(resolve => window.setTimeout(resolve, 500));
-        }
-        if (!peer.fileReady) throw new Error('电脑直连不可用，请重试');
-      }
-      const response = await invoke<{ ticket: string }>('bridge_attachment_ticket', { attachmentId: attachment.id });
-      await receiver.begin(attachment, response.ticket);
+      if (peer?.fileReady && receiver && attachment.desktopDeviceId === selectedDesktopId) {
+        const response = await invoke<{ ticket: string }>('bridge_attachment_ticket', { attachmentId: attachment.id });
+        directAttachmentRef.current = attachment;
+        await receiver.begin(attachment, response.ticket);
+      } else await downloadRelayAttachment(attachment);
     } catch (error) {
-      setAttachmentTransfers(current => ({ ...current, [attachment.id]: {
-        status: 'error', received: 0, error: errorText(error),
-      } }));
+      directAttachmentRef.current = null;
+      await downloadRelayAttachment(attachment);
     }
   }
 
@@ -713,7 +735,8 @@ function App() {
       rememberTurn({ ...turn, taskRequestKey: key, status: 'working' });
       const result = await invoke<{ task: { id: string } }>('bridge_create_task', {
         sessionId: turn.sessionId, desktopDeviceId: device.desktopDeviceId,
-        mobileDeviceId: device.mobileDeviceId, idempotencyKey: key, prompt: turn.goal,
+        mobileDeviceId: device.mobileDeviceId, idempotencyKey: key,
+        prompt: desktopTaskPrompt(turn.goal, turn.contextMessages?.at(-1)?.content ?? turn.goal),
         turnId: turn.turnId, toolCallId: turn.callId,
       });
       rememberTurn({ ...turn, taskRequestKey: key, taskId: result.task.id, status: 'working' });
@@ -760,10 +783,10 @@ function App() {
         <div className="mobile-attachment-body"><strong>{attachment.name}</strong>
           <small>{size} · {attachment.mimeType}</small>
           <p>{transfer?.status === 'downloading'
-            ? `正在直连获取 · ${Math.round(100 * transfer.received / Math.max(attachment.size, 1))}%`
+            ? `正在获取 · ${Math.round(100 * transfer.received / Math.max(attachment.size, 1))}%`
             : transfer?.status === 'ready' ? '已完成 SHA-256 校验，可预览或保存'
             : transfer?.status === 'error' ? transfer.error
-            : '仅电脑在线且直连可用时可获取'}</p>
+            : '直连优先；不可用时通过服务器中转获取'}</p>
           <div className="mobile-attachment-actions">
             {transfer?.status !== 'ready' && <button type="button" disabled={transfer?.status === 'downloading'}
               onClick={() => void downloadAttachment(attachment)}>{transfer?.status === 'downloading' ? '传输中…' : '获取附件'}</button>}

@@ -1,4 +1,5 @@
 use crate::account::AppState;
+use base64::Engine as _;
 use reqwest::{header::COOKIE, Method};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -112,6 +113,53 @@ pub async fn bridge_attachments(state: State<'_, AppState>, session_id: String) 
 pub async fn bridge_attachment_ticket(state: State<'_, AppState>, attachment_id: String) -> Result<Value, String> {
     let id = pairing_id(&attachment_id)?;
     request(&state, Method::POST, &format!("/api/mobile/attachments/{id}/ticket"), Some(json!({}))).await
+}
+
+#[tauri::command]
+pub async fn bridge_attachment_relay_download(
+    app: AppHandle, state: State<'_, AppState>, attachment_id: String,
+    name: String, mime_type: String, size: u64, sha256: String,
+) -> Result<Value, String> {
+    let id = pairing_id(&attachment_id)?;
+    let offset = crate::mobile_attachment::mobile_attachment_receive_start(
+        app.clone(), attachment_id.clone(), name, mime_type, size, sha256)?;
+    if offset == size {
+        crate::mobile_attachment::mobile_attachment_receive_finish(attachment_id)?;
+        return Ok(json!({"received": size}));
+    }
+    let issued = request(&state, Method::POST,
+        &format!("/api/mobile/attachments/{id}/ticket"), Some(json!({}))).await?;
+    let ticket = issued["ticket"].as_str().ok_or("传输票据无效")?;
+    let client = reqwest::Client::builder().connect_timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(600)).build()
+        .map_err(|_| "无法初始化附件中转下载".to_string())?;
+    let mut builder = client.get(bridge_url(&format!("/api/mobile/attachments/{id}/relay")))
+        .header(COOKIE, current_cookie(&state)?)
+        .header("X-Harmony-Relay-Ticket", ticket);
+    if let Some((device_id, token)) = DEVICE_AUTH.get_or_init(|| Mutex::new(None))
+        .lock().map_err(|_| "设备状态不可用")?.clone() {
+        builder = builder.header("X-Harmony-Device-Id", device_id)
+            .header("X-Harmony-Device-Kind", "mobile")
+            .header("X-Harmony-Device-Token", token);
+    }
+    if offset > 0 { builder = builder.header(reqwest::header::RANGE, format!("bytes={offset}-")); }
+    let mut response = builder.send().await.map_err(|_| "附件中转连接失败，请重试")?;
+    if response.status() != if offset > 0 { reqwest::StatusCode::PARTIAL_CONTENT } else { reqwest::StatusCode::OK } {
+        return Err(format!("附件中转不可用（HTTP {}）", response.status()));
+    }
+    let mut received = offset;
+    while let Some(chunk) = response.chunk().await.map_err(|_| "附件中转传输中断，可重试续传")? {
+        for part in chunk.chunks(16 * 1024) {
+            let encoded = base64::engine::general_purpose::STANDARD.encode(part);
+            received = crate::mobile_attachment::mobile_attachment_receive_chunk(
+                attachment_id.clone(), received, encoded)?;
+        }
+        let _ = app.emit("mobile_attachment_relay_progress", json!({
+            "attachmentId": attachment_id, "received": received,
+        }));
+    }
+    crate::mobile_attachment::mobile_attachment_receive_finish(attachment_id)?;
+    Ok(json!({"received": received}))
 }
 
 #[tauri::command]
