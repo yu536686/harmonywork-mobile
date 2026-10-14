@@ -28,6 +28,8 @@ pub fn run() {
             bridge::bridge_claim_pairing,
             bridge::bridge_sync_session,
             bridge::bridge_create_session,
+            bridge::bridge_delete_session,
+            bridge::bridge_deleted_sessions,
             bridge::bridge_list_sessions,
             bridge::bridge_append_message,
             bridge::bridge_messages,

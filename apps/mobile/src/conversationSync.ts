@@ -14,6 +14,15 @@ export type SyncState = {
   pendingTurns: PendingTurn[];
   answeredTurns: string[];
 };
+
+export function forgetDeletedSessions(state: SyncState, ids: ReadonlySet<string>): SyncState {
+  const cursors = Object.fromEntries(Object.entries(state.cursors).filter(([id]) => !ids.has(id)));
+  const taskEventCursors = Object.fromEntries(Object.entries(state.taskEventCursors ?? {}).filter(([id]) => !ids.has(id)));
+  return {
+    ...state, cursors, taskEventCursors,
+    pendingTurns: state.pendingTurns.filter(turn => !ids.has(turn.sessionId)),
+  };
+}
 type StorageLike = Pick<Storage, 'getItem' | 'setItem'>;
 
 const prefix = 'harmony-work-mobile:sync:';

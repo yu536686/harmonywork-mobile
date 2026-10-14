@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mergeSharedMessages, loadSyncState, saveSyncState, upsertPendingTurn, markTurnAnswered, restartPendingTurn } from '../src/conversationSync.ts';
+import { forgetDeletedSessions, mergeSharedMessages, loadSyncState, saveSyncState, upsertPendingTurn, markTurnAnswered, restartPendingTurn } from '../src/conversationSync.ts';
 
 const session = { id: 's', title: 'test', updatedAt: 1, messages: [
   { id: 'a', role: 'user', content: 'same' },
@@ -40,4 +40,18 @@ test('restart replaces a failed lease without duplicating the user message', () 
   assert.deepEqual(next.pendingTurns.map(turn => turn.turnId), ['retry']);
   assert.equal(next.pendingTurns[0].userMessageId, 'a');
   assert.equal(next.pendingTurns[0].assistantMessageId, 'answer');
+});
+
+test('deleted shared session cannot resume a pending turn or retain sync cursors', () => {
+  const state = {
+    cursors: { deleted: 7, kept: 4 }, taskEventCursors: { deleted: 3, kept: 2 },
+    pendingTurns: [
+      { sessionId: 'deleted', turnId: 'old', userMessageId: 'a', assistantMessageId: 'b', status: 'queued' },
+      { sessionId: 'kept', turnId: 'new', userMessageId: 'c', assistantMessageId: 'd', status: 'queued' },
+    ], answeredTurns: [],
+  };
+  const next = forgetDeletedSessions(state, new Set(['deleted']));
+  assert.deepEqual(next.cursors, { kept: 4 });
+  assert.deepEqual(next.taskEventCursors, { kept: 2 });
+  assert.deepEqual(next.pendingTurns.map(turn => turn.turnId), ['new']);
 });

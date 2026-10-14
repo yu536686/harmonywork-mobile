@@ -235,6 +235,19 @@ pub async fn bridge_create_session(state: State<'_, AppState>, session_id: Strin
 }
 
 #[tauri::command]
+pub async fn bridge_delete_session(state: State<'_, AppState>, session_id: String) -> Result<Value, String> {
+    let id = pairing_id(&session_id)?;
+    request(&state, Method::DELETE, &format!("/api/mobile/sessions/{id}"), None).await
+}
+
+#[tauri::command]
+pub async fn bridge_deleted_sessions(state: State<'_, AppState>, ids: Vec<String>) -> Result<Value, String> {
+    if ids.len() > 100 { return Err("会话查询过多".into()); }
+    for id in &ids { pairing_id(id)?; }
+    request(&state, Method::POST, "/api/mobile/sessions/deletions/check", Some(json!({"ids": ids}))).await
+}
+
+#[tauri::command]
 pub async fn bridge_list_sessions(
     state: State<'_, AppState>, mobile_device_id: String,
     before_cursor: Option<String>, before_id: Option<String>,

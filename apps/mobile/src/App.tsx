@@ -8,7 +8,7 @@ import { DirectFileReceiver, type SharedAttachment } from './directFileReceiver.
 import { desktopTaskPrompt } from './desktopTaskPrompt.ts';
 import { TaskEventCard } from './TaskEventCard.tsx';
 import { mergeTaskEvents, type TaskEvent } from './taskEvents.ts';
-import { loadSyncState, markTurnAnswered, mergeSharedMessages, restartPendingTurn, saveSyncState, upsertPendingTurn, type PendingTurn, type SharedMessage, type SyncState } from './conversationSync.ts';
+import { forgetDeletedSessions, loadSyncState, markTurnAnswered, mergeSharedMessages, restartPendingTurn, saveSyncState, upsertPendingTurn, type PendingTurn, type SharedMessage, type SyncState } from './conversationSync.ts';
 import type { AccountView, ChatMessage, ChatSession } from './model.ts';
 import { loadSessions, saveSessions } from './sessionStore.ts';
 import './App.css';
@@ -522,8 +522,17 @@ function App() {
     setView('chat');
   }
   function openChat(id: string) { setActiveId(id); setDraft(''); setChatError(null); setView('chat'); }
-  function deleteChat(id: string) {
-    if (!window.confirm('删除这段保存在手机上的对话？')) return;
+  async function deleteChat(id: string) {
+    if (!window.confirm(mobileDeviceId ? '从手机、电脑和云端删除这段对话？' : '删除这段保存在手机上的对话？')) return;
+    const owner = accountId.current;
+    try {
+      if (mobileDeviceId) await invoke('bridge_delete_session', { sessionId: id });
+      if (owner !== accountId.current) return;
+    } catch (error) {
+      window.alert(`删除失败，已保留会话：${errorText(error)}`);
+      return;
+    }
+    persistSync(forgetDeletedSessions(syncState.current, new Set([id])));
     setSessions(current => current.filter(session => session.id !== id));
     if (activeId === id) { setActiveId(null); setView('conversations'); }
   }
@@ -567,9 +576,21 @@ function App() {
         beforeId = last.id;
       }
       if (owner !== accountId.current) return;
+      const deletedIds = new Set<string>();
+      const localIds = sessionsRef.current.map(session => session.id);
+      for (let index = 0; index < localIds.length; index += 100) {
+        const response = await invoke<{ deletedIds: string[] }>('bridge_deleted_sessions', { ids: localIds.slice(index, index + 100) });
+        if (owner !== accountId.current) return;
+        for (const id of response.deletedIds) deletedIds.add(id);
+      }
+      if (deletedIds.size) {
+        persistSync(forgetDeletedSessions(syncState.current, deletedIds));
+        setSessions(current => current.filter(session => !deletedIds.has(session.id)));
+        if (activeId && deletedIds.has(activeId)) { setActiveId(null); setView('conversations'); }
+      }
       const known = new Map(allSessions.map(item => [item.id, item.title]));
       const pendingMessageIds = new Set(syncState.current.pendingTurns.map(turn => turn.userMessageId));
-      for (const local of sessionsRef.current) {
+      for (const local of sessionsRef.current.filter(session => !deletedIds.has(session.id))) {
         const sharedTitle = known.get(local.id);
         if (sharedTitle === undefined) {
           await invoke('bridge_create_session', { sessionId: local.id, title: local.title });
@@ -582,7 +603,7 @@ function App() {
           markLocalSeq(local.id, message.id, ack.message.seq);
         }
       }
-      for (const item of allSessions) {
+      for (const item of allSessions.filter(session => !deletedIds.has(session.id))) {
         let cursor = syncState.current.cursors[item.id] ?? 0;
         while (cursor < item.latestSeq) {
           const page = await invoke<{ messages: SharedMessage[] }>('bridge_messages', { sessionId: item.id, afterSeq: cursor });
