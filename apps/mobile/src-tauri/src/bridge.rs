@@ -7,7 +7,7 @@ use std::sync::{Mutex, OnceLock};
 use tauri::State;
 use uuid::Uuid;
 
-const BRIDGE_ORIGIN: &str = "https://remote.harmonywatch.cn";
+const BRIDGE_ORIGIN: &str = "https://remote.harmonywatch.cn:8443";
 static DEVICE_AUTH: OnceLock<Mutex<Option<(String, String)>>> = OnceLock::new();
 
 #[tauri::command]
@@ -329,7 +329,7 @@ mod tests {
 
     #[test]
     fn bridge_requests_use_direct_public_host_and_validated_ids() {
-        assert_eq!(bridge_url("/api/mobile/devices"), "https://remote.harmonywatch.cn/api/mobile/devices");
+        assert_eq!(bridge_url("/api/mobile/devices"), "https://remote.harmonywatch.cn:8443/api/mobile/devices");
         assert!(pairing_id("3ecc3126-67a5-4e33-bfad-f1fe2308ef9e").is_ok());
         assert!(pairing_id("../api/auth/me").is_err());
     }
